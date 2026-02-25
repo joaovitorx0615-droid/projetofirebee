@@ -1,7 +1,9 @@
 const CSV_SOURCES = ["/api/producao-csv", "/data/latest-sheet.csv"];
 const SYNC_ENDPOINT = "/api/producao-sync";
+const STATUS_ENDPOINT = "/api/producao-status";
 const HISTORY_ENDPOINT = "/api/production-history";
 const HISTORY_ENTRY_ENDPOINT = "/api/production-history-entry";
+const AUDIT_ENDPOINT = "/api/audit-event";
 const MONTHS = ["Jan", "Fev", "Mar", "Abr", "Mai", "Jun", "Jul", "Ago", "Set", "Out", "Nov", "Dez"];
 const DISPLAY_YEAR = 2026;
 const AUTO_REFRESH_MS = 10000;
@@ -38,6 +40,7 @@ const elements = {
   saveProductionBtn: document.querySelector("#save-production-btn"),
   savedDevices: document.querySelector("#saved-devices"),
   doneDevices: document.querySelector("#done-devices"),
+  systemAlert: document.querySelector("#system-alert"),
 };
 
 let allRows = [];
@@ -110,6 +113,67 @@ function toLocalDateKey(date = new Date()) {
   const month = String(date.getMonth() + 1).padStart(2, "0");
   const day = String(date.getDate()).padStart(2, "0");
   return `${year}-${month}-${day}`;
+}
+
+function showSystemAlert(message, tone = "warn") {
+  if (!elements.systemAlert) return;
+  elements.systemAlert.textContent = String(message || "");
+  elements.systemAlert.classList.remove("hidden", "warn", "danger");
+  elements.systemAlert.classList.add(tone === "danger" ? "danger" : "warn");
+}
+
+function hideSystemAlert() {
+  if (!elements.systemAlert) return;
+  elements.systemAlert.classList.add("hidden");
+}
+
+async function sendAuditEvent(action, payload = {}) {
+  if (!action) return;
+  try {
+    await fetch(encodeURI(AUDIT_ENDPOINT), {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ action, ...payload }),
+    });
+  } catch (error) {
+    // Nao bloqueia a UX quando o log remoto falhar.
+  }
+}
+
+async function loadServerStatus() {
+  try {
+    const response = await fetch(encodeURI(STATUS_ENDPOINT), { cache: "no-store" });
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}`);
+    }
+    const status = await response.json();
+    const historyMode = String(status?.historyMode || "");
+    const historyLastError = String(status?.historyLastError || "").trim();
+
+    if (historyMode === "mariadb") {
+      hideSystemAlert();
+      return;
+    }
+
+    if (historyMode === "json_fallback") {
+      const detail = historyLastError ? ` Detalhe: ${historyLastError}` : "";
+      showSystemAlert(`ALERTA: Servidor rodando sem banco de dados (modo fallback).${detail}`, "danger");
+      return;
+    }
+
+    if (historyMode === "db_required") {
+      const detail = historyLastError ? ` Detalhe: ${historyLastError}` : "";
+      showSystemAlert(`ALERTA: Banco de dados obrigatorio indisponivel.${detail}`, "danger");
+      return;
+    }
+
+    const detail = historyLastError ? ` Detalhe: ${historyLastError}` : "";
+    showSystemAlert(`ALERTA: Servidor sem confirmacao de conexao com banco.${detail}`, "danger");
+  } catch (error) {
+    showSystemAlert("ALERTA: nao foi possivel consultar o status do banco no servidor.", "danger");
+  }
 }
 
 async function loadProductionHistoryFromServer() {
@@ -774,6 +838,7 @@ function bindEvents() {
     try {
       await forceServerSync();
       await loadDefaultCsv();
+      await sendAuditEvent("dashboard_reload_csv", { source: "api" });
     } catch (error) {
       alert("Nao foi possivel recarregar o arquivo padrao. Use o upload manual.");
     }
@@ -784,6 +849,10 @@ function bindEvents() {
     if (!file) return;
     const text = await file.text();
     parseCsvText(text);
+    await sendAuditEvent("dashboard_csv_manual_import", {
+      fileName: String(file.name || ""),
+      fileSize: Number(file.size || 0),
+    });
   });
 
   elements.siglaButtons.addEventListener("click", (event) => {
@@ -828,6 +897,14 @@ function bindEvents() {
     });
     saveDailyProgress();
     saveTodayHistoryForDevice(selectedRowKey, target, done, rejected);
+    sendAuditEvent("production_saved", {
+      key: selectedRowKey,
+      sigla: selectedRow.sigla,
+      codigo: selectedRow.codigo,
+      target,
+      done,
+      rejected,
+    });
     renderSiglaButtons(allRows);
     renderSavedDevices();
     renderQualityPanel();
@@ -861,6 +938,12 @@ function bindEvents() {
           testedAt: new Date().toISOString(),
         };
         saveDailyProgress();
+        sendAuditEvent("quality_test_complete", {
+          key,
+          target: parseNumber(dailyProgress[key]?.target),
+          done: parseNumber(dailyProgress[key]?.done),
+          rejected: parseNumber(dailyProgress[key]?.rejected),
+        });
         renderSavedDevices();
         renderQualityPanel();
         return;
@@ -884,6 +967,12 @@ function bindEvents() {
           parseNumber(dailyProgress[key].done),
           rejected
         );
+        sendAuditEvent("quality_rejected_set", {
+          key,
+          target: parseNumber(dailyProgress[key]?.target),
+          done: parseNumber(dailyProgress[key]?.done),
+          rejected,
+        });
         renderSavedDevices();
         renderQualityPanel();
       }
@@ -914,6 +1003,7 @@ function bindEvents() {
       if (!shouldDelete) return;
       delete dailyProgress[key];
       saveDailyProgress();
+      sendAuditEvent("production_deleted", { key });
       editingDeviceKey = "";
       renderSiglaButtons(allRows);
       renderSavedDevices();
@@ -943,6 +1033,12 @@ function bindEvents() {
       };
       saveDailyProgress();
       saveTodayHistoryForDevice(key, target, done, currentRejected);
+      sendAuditEvent("production_marked_complete", {
+        key,
+        target,
+        done,
+        rejected: currentRejected,
+      });
       renderSiglaButtons(allRows);
       renderSavedDevices();
       renderQualityPanel();
@@ -966,6 +1062,12 @@ function bindEvents() {
       });
       saveDailyProgress();
       saveTodayHistoryForDevice(key, target, done, rejected);
+      sendAuditEvent("production_updated", {
+        key,
+        target,
+        done,
+        rejected,
+      });
       editingDeviceKey = "";
       renderSiglaButtons(allRows);
       renderSavedDevices();
@@ -987,6 +1089,7 @@ async function init() {
   bindEvents();
 
   try {
+    await loadServerStatus();
     try {
       await loadProductionHistoryFromServer();
     } catch (error) {
@@ -995,6 +1098,7 @@ async function init() {
     await loadDefaultCsv();
     setInterval(async () => {
       try {
+        await loadServerStatus();
         await loadProductionHistoryFromServer();
         await loadDefaultCsv();
       } catch (error) {

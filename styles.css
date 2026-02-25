@@ -23,6 +23,33 @@ body {
   overflow: hidden;
 }
 
+.system-alert {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 80;
+  padding: 8px 14px;
+  font: 700 0.8rem/1.25 "DM Sans", sans-serif;
+  text-align: center;
+}
+
+.system-alert.warn {
+  background: #ffdb8a;
+  color: #3a2a00;
+  border-bottom: 2px solid #c38c00;
+}
+
+.system-alert.danger {
+  background: #ff9b93;
+  color: #4b0a05;
+  border-bottom: 2px solid #b01e13;
+}
+
+.system-alert.hidden {
+  display: none;
+}
+
 .app-shell {
   width: 100vw;
   height: 100vh;

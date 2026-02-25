@@ -47,6 +47,7 @@ const DB_PASSWORD = process.env.DB_PASSWORD || "";
 const DB_NAME = process.env.DB_NAME || "dashboard_producao";
 const DB_CONNECTION_LIMIT = Math.max(2, Number(process.env.DB_CONNECTION_LIMIT) || 4);
 const DB_CREATE_IF_MISSING = (process.env.DB_CREATE_IF_MISSING || "true").toLowerCase() !== "false";
+const REQUIRE_DB = (process.env.REQUIRE_DB || "true").toLowerCase() !== "false";
 
 const GOOGLE_SPREADSHEET_ID = process.env.GOOGLE_SPREADSHEET_ID || "";
 const GOOGLE_SHEET_GID = process.env.GOOGLE_SHEET_GID || "";
@@ -80,6 +81,10 @@ const historyState = {
   byDate: {},
 };
 let historyPool = null;
+const historyRuntime = {
+  mode: "mariadb",
+  lastError: null,
+};
 
 function toLocalDateKey(date) {
   const d = date instanceof Date ? date : new Date();
@@ -226,6 +231,16 @@ function loadLegacyHistoryJson() {
   }
 }
 
+function sanitizeHistoryMap(input) {
+  if (!input || typeof input !== "object" || Array.isArray(input)) return {};
+  return input;
+}
+
+async function saveHistoryJsonToDisk() {
+  await fs.promises.mkdir(path.dirname(HISTORY_FILE), { recursive: true });
+  await fs.promises.writeFile(HISTORY_FILE, JSON.stringify(historyState.byDate), "utf-8");
+}
+
 function assertDbIdentifier(name) {
   if (!/^[A-Za-z0-9_]+$/.test(name)) {
     throw new Error("DB_NAME invalido. Use apenas letras, numeros e underscore.");
@@ -276,6 +291,21 @@ async function createHistoryPool() {
         rejected DOUBLE NOT NULL DEFAULT 0,
         updated_at DATETIME(3) NOT NULL,
         PRIMARY KEY (date_key, item_key)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+    `);
+    await conn.query(`
+      CREATE TABLE IF NOT EXISTS production_audit_log (
+        id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+        event_type VARCHAR(80) NOT NULL,
+        item_key VARCHAR(255) NULL,
+        source_ip VARCHAR(80) NULL,
+        user_agent VARCHAR(255) NULL,
+        payload_json LONGTEXT NOT NULL,
+        created_at DATETIME(3) NOT NULL,
+        PRIMARY KEY (id),
+        KEY idx_audit_created_at (created_at),
+        KEY idx_audit_event_type (event_type),
+        KEY idx_audit_item_key (item_key)
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
     `);
   } finally {
@@ -361,17 +391,29 @@ async function loadHistoryFromDb() {
 }
 
 async function saveHistoryEntry(dateKey, key, target, done, rejected) {
+  if (historyRuntime.mode === "json_fallback") {
+    await saveHistoryJsonToDisk();
+    return;
+  }
+
   const pool = await createHistoryPool();
-  await pool.query(
-    `INSERT INTO production_history (date_key, item_key, target, done, rejected, updated_at)
-     VALUES (?, ?, ?, ?, ?, NOW(3))
-     ON DUPLICATE KEY UPDATE
-       target = VALUES(target),
-       done = VALUES(done),
-       rejected = VALUES(rejected),
-       updated_at = VALUES(updated_at)`,
-    [dateKey, key, target, done, rejected]
-  );
+  try {
+    await pool.query(
+      `INSERT INTO production_history (date_key, item_key, target, done, rejected, updated_at)
+       VALUES (?, ?, ?, ?, ?, NOW(3))
+       ON DUPLICATE KEY UPDATE
+         target = VALUES(target),
+         done = VALUES(done),
+         rejected = VALUES(rejected),
+         updated_at = VALUES(updated_at)`,
+      [dateKey, key, target, done, rejected]
+    );
+  } catch (error) {
+    historyRuntime.mode = "json_fallback";
+    historyRuntime.lastError = String(error.message || error);
+    console.error(`Falha ao salvar no MariaDB. Ativando fallback JSON: ${historyRuntime.lastError}`);
+    await saveHistoryJsonToDisk();
+  }
 }
 
 async function closeHistoryDb() {
@@ -382,6 +424,37 @@ async function closeHistoryDb() {
     // Ignora falhas no encerramento.
   } finally {
     historyPool = null;
+  }
+}
+
+function resolveSourceIp(req) {
+  const forwarded = req?.headers?.["x-forwarded-for"];
+  if (typeof forwarded === "string" && forwarded.trim()) {
+    return forwarded.split(",")[0].trim();
+  }
+  const remoteAddress = req?.socket?.remoteAddress;
+  return typeof remoteAddress === "string" ? remoteAddress : "";
+}
+
+async function saveAuditEvent(eventType, payload, req) {
+  if (!eventType || typeof eventType !== "string") return;
+  if (historyRuntime.mode !== "mariadb") return;
+
+  try {
+    const pool = await createHistoryPool();
+    const itemKeyRaw = String(payload?.key || payload?.itemKey || "").trim();
+    const itemKey = itemKeyRaw || null;
+    const sourceIp = resolveSourceIp(req) || null;
+    const userAgent = String(req?.headers?.["user-agent"] || "").slice(0, 255) || null;
+    const payloadJson = JSON.stringify(payload || {});
+
+    await pool.query(
+      `INSERT INTO production_audit_log (event_type, item_key, source_ip, user_agent, payload_json, created_at)
+       VALUES (?, ?, ?, ?, ?, NOW(3))`,
+      [eventType, itemKey, sourceIp, userAgent, payloadJson]
+    );
+  } catch (error) {
+    console.error(`Falha ao registrar auditoria: ${String(error.message || error)}`);
   }
 }
 
@@ -444,7 +517,20 @@ async function syncSheetCsv() {
 
 async function startSheetSync() {
   await loadCacheFromDisk();
-  await loadHistoryFromDb();
+  try {
+    await loadHistoryFromDb();
+    historyRuntime.mode = "mariadb";
+    historyRuntime.lastError = null;
+  } catch (error) {
+    historyRuntime.lastError = String(error.message || error);
+    if (REQUIRE_DB) {
+      historyRuntime.mode = "db_required";
+      throw new Error(`MariaDB obrigatorio e indisponivel: ${historyRuntime.lastError}`);
+    }
+    historyRuntime.mode = "json_fallback";
+    historyState.byDate = sanitizeHistoryMap(loadLegacyHistoryJson());
+    console.error(`MariaDB indisponivel. Historico em JSON local (REQUIRE_DB=false): ${historyRuntime.lastError}`);
+  }
   await syncSheetCsv();
   setInterval(() => {
     syncSheetCsv();
@@ -487,6 +573,9 @@ function handleApiRoutes(req, res) {
         lastError: sheetState.lastError,
         syncIntervalMs: SHEET_SYNC_MS,
         sourceMode: sheetState.sourceMode,
+        historyMode: historyRuntime.mode,
+        historyLastError: historyRuntime.lastError,
+        requireDb: REQUIRE_DB,
       })
     );
     return true;
@@ -530,6 +619,17 @@ function handleApiRoutes(req, res) {
           Number.isFinite(done) ? done : 0,
           Number.isFinite(rejected) ? rejected : 0
         );
+        await saveAuditEvent(
+          "history_entry_upsert",
+          {
+            dateKey,
+            key,
+            target: Number.isFinite(target) ? target : 0,
+            done: Number.isFinite(done) ? done : 0,
+            rejected: Number.isFinite(rejected) ? rejected : 0,
+          },
+          req
+        );
 
         res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
         res.end(JSON.stringify({ ok: true }));
@@ -543,7 +643,8 @@ function handleApiRoutes(req, res) {
 
   if (pathname === "/api/producao-sync") {
     syncSheetCsv()
-      .then(() => {
+      .then(async () => {
+        await saveAuditEvent("sheet_sync_manual", { sourceMode: sheetState.sourceMode }, req);
         res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
         res.end(
           JSON.stringify({
@@ -562,6 +663,79 @@ function handleApiRoutes(req, res) {
             message: String(error?.message || error),
           })
         );
+      });
+    return true;
+  }
+
+  if (pathname === "/api/audit-event" && req.method === "POST") {
+    parseJsonBody(req)
+      .then(async (body) => {
+        const action = String(body?.action || "").trim();
+        if (!action) {
+          res.writeHead(400, { "Content-Type": "application/json; charset=utf-8" });
+          res.end(JSON.stringify({ ok: false, message: "Campo action obrigatorio." }));
+          return;
+        }
+        await saveAuditEvent(action, body, req);
+        res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ ok: true }));
+      })
+      .catch((error) => {
+        res.writeHead(400, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ ok: false, message: String(error.message || error) }));
+      });
+    return true;
+  }
+
+  if (pathname === "/api/audit-events" && req.method === "GET") {
+    if (historyRuntime.mode !== "mariadb") {
+      res.writeHead(503, { "Content-Type": "application/json; charset=utf-8" });
+      res.end(
+        JSON.stringify({
+          ok: false,
+          message: "Auditoria indisponivel sem MariaDB.",
+          historyMode: historyRuntime.mode,
+        })
+      );
+      return true;
+    }
+
+    Promise.resolve()
+      .then(async () => {
+        const parsedUrl = new URL(req.url || "/api/audit-events", "http://localhost");
+        const rawLimit = Number(parsedUrl.searchParams.get("limit") || 100);
+        const limit = Math.max(1, Math.min(500, Number.isFinite(rawLimit) ? rawLimit : 100));
+        const pool = await createHistoryPool();
+        const rows = await pool.query(
+          `SELECT id, event_type, item_key, source_ip, user_agent, payload_json, created_at
+           FROM production_audit_log
+           ORDER BY id DESC
+           LIMIT ?`,
+          [limit]
+        );
+        const normalized = (rows || []).map((row) => {
+          let payload = {};
+          try {
+            payload = row.payload_json ? JSON.parse(String(row.payload_json)) : {};
+          } catch (error) {
+            payload = {};
+          }
+          return {
+            id: Number(row.id),
+            eventType: row.event_type,
+            itemKey: row.item_key,
+            sourceIp: row.source_ip,
+            userAgent: row.user_agent,
+            payload,
+            createdAt: row.created_at,
+          };
+        });
+        res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ ok: true, items: normalized }));
+      })
+      .catch((error) => {
+        res.writeHead(500, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ ok: false, message: String(error.message || error) }));
       });
     return true;
   }
@@ -607,10 +781,6 @@ const server = http.createServer((req, res) => {
   });
 });
 
-startSheetSync().catch((error) => {
-  console.error(`Erro ao iniciar sincronizacao da planilha: ${error.message}`);
-});
-
 process.on("SIGINT", () => {
   closeHistoryDb().catch(() => {});
   process.exit(0);
@@ -623,7 +793,15 @@ process.on("exit", () => {
   closeHistoryDb().catch(() => {});
 });
 
-server.listen(PORT, () => {
-  console.log(`Servidor ativo em http://localhost:${PORT}`);
-  console.log(`Sincronizacao ativa: ${SHEET_SYNC_MS}ms`);
+async function boot() {
+  await startSheetSync();
+  server.listen(PORT, () => {
+    console.log(`Servidor ativo em http://localhost:${PORT}`);
+    console.log(`Sincronizacao ativa: ${SHEET_SYNC_MS}ms`);
+  });
+}
+
+boot().catch((error) => {
+  console.error(`Erro ao iniciar sincronizacao da planilha: ${error.message}`);
+  process.exit(1);
 });
