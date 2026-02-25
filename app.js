@@ -41,6 +41,7 @@ const elements = {
   savedDevices: document.querySelector("#saved-devices"),
   doneDevices: document.querySelector("#done-devices"),
   systemAlert: document.querySelector("#system-alert"),
+  systemNote: document.querySelector("#system-note"),
 };
 
 let allRows = [];
@@ -127,6 +128,24 @@ function hideSystemAlert() {
   elements.systemAlert.classList.add("hidden");
 }
 
+function showSystemNote(message) {
+  if (!elements.systemNote) return;
+  const text = String(message || "").trim();
+  if (!text) {
+    elements.systemNote.classList.add("hidden");
+    elements.systemNote.textContent = "";
+    return;
+  }
+  elements.systemNote.textContent = text;
+  elements.systemNote.classList.remove("hidden");
+}
+
+function hideSystemNote() {
+  if (!elements.systemNote) return;
+  elements.systemNote.classList.add("hidden");
+  elements.systemNote.textContent = "";
+}
+
 async function sendAuditEvent(action, payload = {}) {
   if (!action) return;
   try {
@@ -151,28 +170,29 @@ async function loadServerStatus() {
     const status = await response.json();
     const historyMode = String(status?.historyMode || "");
     const historyLastError = String(status?.historyLastError || "").trim();
+    const sheetLastError = String(status?.lastError || "").trim();
 
     if (historyMode === "mariadb") {
       hideSystemAlert();
-      return;
-    }
-
-    if (historyMode === "json_fallback") {
+    } else if (historyMode === "json_fallback") {
       const detail = historyLastError ? ` Detalhe: ${historyLastError}` : "";
       showSystemAlert(`ALERTA: Servidor rodando sem banco de dados (modo fallback).${detail}`, "danger");
-      return;
-    }
-
-    if (historyMode === "db_required") {
+    } else if (historyMode === "db_required") {
       const detail = historyLastError ? ` Detalhe: ${historyLastError}` : "";
       showSystemAlert(`ALERTA: Banco de dados obrigatorio indisponivel.${detail}`, "danger");
-      return;
+    } else {
+      const detail = historyLastError ? ` Detalhe: ${historyLastError}` : "";
+      showSystemAlert(`ALERTA: Estado do banco nao confirmado.${detail}`, "danger");
     }
 
-    const detail = historyLastError ? ` Detalhe: ${historyLastError}` : "";
-    showSystemAlert(`ALERTA: Servidor sem confirmacao de conexao com banco.${detail}`, "danger");
+    if (sheetLastError) {
+      showSystemNote(`Aviso (planilha): ${sheetLastError}`);
+    } else {
+      hideSystemNote();
+    }
   } catch (error) {
-    showSystemAlert("ALERTA: nao foi possivel consultar o status do banco no servidor.", "danger");
+    hideSystemAlert();
+    showSystemNote("Aviso: nao foi possivel consultar o status do servidor.");
   }
 }
 
@@ -839,8 +859,10 @@ function bindEvents() {
       await forceServerSync();
       await loadDefaultCsv();
       await sendAuditEvent("dashboard_reload_csv", { source: "api" });
+      hideSystemNote();
     } catch (error) {
       alert("Nao foi possivel recarregar o arquivo padrao. Use o upload manual.");
+      showSystemNote("Aviso: recarga automatica falhou. Use o upload manual.");
     }
   });
 
@@ -849,6 +871,7 @@ function bindEvents() {
     if (!file) return;
     const text = await file.text();
     parseCsvText(text);
+    hideSystemNote();
     await sendAuditEvent("dashboard_csv_manual_import", {
       fileName: String(file.name || ""),
       fileSize: Number(file.size || 0),
@@ -1107,6 +1130,7 @@ async function init() {
     }, AUTO_REFRESH_MS);
   } catch (error) {
     elements.tableBody.innerHTML = `<tr><td colspan="15">Nao foi possivel carregar o CSV automaticamente. Use "Carregar outro CSV".</td></tr>`;
+    showSystemNote("Aviso: o CSV padrao nao carregou automaticamente.");
   }
 }
 
