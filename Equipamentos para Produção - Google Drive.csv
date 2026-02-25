@@ -1,0 +1,39 @@
+﻿Mensagem de alerta exibida.,A,B,C,D,E,F,G,H,I,J,K,L,M,N,O
+Editar com o app Planilhas,CONSUMO MENSAL POR PRODUTO 2026 ,,,,,,,,,,,,,,
+Faça ajustes e compartilhe com outras pessoas para editar simultaneamente.,SIGLA,CÓDIGO,Jan,Fev,Mar,Abr,Mai,Jun,Jul,Ago,Set,Out,Nov,Dez,Total Por produto
+AGORA NÃOUSAR O APP,LRDFT,21314,1000,1500,2000,,,,,,,,,,1000
+4,LRDEF,21324,,,,,,,,,,,,,0
+Equipamentos para Produção,LRAIR,21241,,,,,,,,,,,,,0
+Editar,LRAIC,21236,,,,,,,,,,,,,0
+7,LRAEX,21244,,,,,,,,,,,,,0
+A produzir,Produzido,Saldo,gráfico,,,,,,,,,,,,0
+>,LRPAN,31511,,,,,,,,,,,,,0
+<,LRRIX,21181,,,,,,,,,,,,,0
+11,LRRIF,21166,,,,,,,,,,,,,0
+12,LRRSA,21141,,,,,,,,,,,,,0
+13,LRRSB,21142,,,,,,,,,,,,,0
+14,LRRIZ,21185,,,,,,,,,,,,,0
+15,LRRIG,21167,,,,,,,,,,,,,0
+16,LRRIL,21172,,,,,,,,,,,,,0
+17,LRRIM,21173,,,,,,,,,,,,,0
+18,LRRIJ,21170,,,,,,,,,,,,,0
+19,LRMAC,21512,,,,,,,,,,,,,0
+20,LRMAF,21511,,,,,,,,,,,,,0
+21,LRMAD,21513,,,,,,,,,,,,,0
+22,LRMAB,21514,,,,,,,,,,,,,0
+23,LRMAG,21510,,,,,,,,,,,,,0
+24,LRMAT,21515,,,,,,,,,,,,,0
+25,LRMAS,21516,,,,,,,,,,,,,0
+26,FHT 7',21026,,,,,,,,,,,,,0
+27,"FHT 7"" SUB",21028,,,,,,,,,,,,,0
+28,FHT 15',21005,,,,,,,,,,,,,0
+29,FHT SUB REDE,21006,,,,,,,,,,,,,0
+30,MIRRORBOX,21021,,,,,,,,,,,,,0
+31,MIRRORBOX S/D,21020,,,,,,,,,,,,,0
+32,MODEM 4G,20903,,,,,,,,,,,,,0
+33,COORD. 2.0,71404,,,,,,,,,,,,,0
+34,MALETA,70801,,,,,,,,,,,,,0
+35,OSID,71701,,,,,,,,,,,,,0
+36,GST,20316,,,,,,,,,,,,,0
+37,Total Mensal,,1000,0,0,0,0,0,0,0,0,0,0,0,
+38,Total Geral,,1000,,,,,,,,,,,,

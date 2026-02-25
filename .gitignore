@@ -1,0 +1,10 @@
+.env
+node_modules/
+npm-debug.log*
+data/*.db
+data/*.db-shm
+data/*.db-wal
+*.log
+
+# credenciais locais
+infra-ratio-488401-i3-36d57b31b9d2.json
