@@ -48,6 +48,8 @@ const DB_NAME = process.env.DB_NAME || "dashboard_producao";
 const DB_CONNECTION_LIMIT = Math.max(2, Number(process.env.DB_CONNECTION_LIMIT) || 4);
 const DB_CREATE_IF_MISSING = (process.env.DB_CREATE_IF_MISSING || "true").toLowerCase() !== "false";
 const REQUIRE_DB = (process.env.REQUIRE_DB || "true").toLowerCase() !== "false";
+const DB_CONNECT_RETRIES = Math.max(0, Number(process.env.DB_CONNECT_RETRIES) || 20);
+const DB_RETRY_DELAY_MS = Math.max(250, Number(process.env.DB_RETRY_DELAY_MS) || 2000);
 
 const GOOGLE_SPREADSHEET_ID = process.env.GOOGLE_SPREADSHEET_ID || "";
 const GOOGLE_SHEET_GID = process.env.GOOGLE_SHEET_GID || "";
@@ -427,6 +429,56 @@ async function closeHistoryDb() {
   }
 }
 
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function formatDbConnectionHint() {
+  return `DB_HOST=${DB_HOST} DB_PORT=${DB_PORT} DB_USER=${DB_USER} DB_NAME=${DB_NAME}`;
+}
+
+async function ensureHistoryDbReady() {
+  let lastError = null;
+  const totalAttempts = REQUIRE_DB ? DB_CONNECT_RETRIES + 1 : 1;
+
+  for (let attempt = 1; attempt <= totalAttempts; attempt += 1) {
+    try {
+      await loadHistoryFromDb();
+      historyRuntime.mode = "mariadb";
+      historyRuntime.lastError = null;
+      return;
+    } catch (error) {
+      lastError = error;
+      historyRuntime.lastError = String(error.message || error);
+      await closeHistoryDb();
+
+      if (!REQUIRE_DB) {
+        break;
+      }
+
+      if (attempt < totalAttempts) {
+        console.error(
+          `MariaDB indisponivel (${attempt}/${totalAttempts}). Nova tentativa em ${DB_RETRY_DELAY_MS}ms. ${formatDbConnectionHint()}`
+        );
+        await delay(DB_RETRY_DELAY_MS);
+      }
+    }
+  }
+
+  if (REQUIRE_DB) {
+    historyRuntime.mode = "db_required";
+    throw new Error(
+      `MariaDB obrigatorio e indisponivel apos ${totalAttempts} tentativa(s). ${formatDbConnectionHint()}. Erro: ${
+        historyRuntime.lastError || String(lastError?.message || lastError || "desconhecido")
+      }`
+    );
+  }
+
+  historyRuntime.mode = "json_fallback";
+  historyState.byDate = sanitizeHistoryMap(loadLegacyHistoryJson());
+  console.error(`MariaDB indisponivel. Historico em JSON local (REQUIRE_DB=false): ${historyRuntime.lastError}`);
+}
+
 function resolveSourceIp(req) {
   const forwarded = req?.headers?.["x-forwarded-for"];
   if (typeof forwarded === "string" && forwarded.trim()) {
@@ -517,20 +569,7 @@ async function syncSheetCsv() {
 
 async function startSheetSync() {
   await loadCacheFromDisk();
-  try {
-    await loadHistoryFromDb();
-    historyRuntime.mode = "mariadb";
-    historyRuntime.lastError = null;
-  } catch (error) {
-    historyRuntime.lastError = String(error.message || error);
-    if (REQUIRE_DB) {
-      historyRuntime.mode = "db_required";
-      throw new Error(`MariaDB obrigatorio e indisponivel: ${historyRuntime.lastError}`);
-    }
-    historyRuntime.mode = "json_fallback";
-    historyState.byDate = sanitizeHistoryMap(loadLegacyHistoryJson());
-    console.error(`MariaDB indisponivel. Historico em JSON local (REQUIRE_DB=false): ${historyRuntime.lastError}`);
-  }
+  await ensureHistoryDbReady();
   await syncSheetCsv();
   setInterval(() => {
     syncSheetCsv();

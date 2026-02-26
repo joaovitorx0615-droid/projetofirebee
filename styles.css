@@ -178,9 +178,72 @@ body {
   color: #3c3c3c;
 }
 
+.quality-rejection-list {
+  margin: 0 0 6px 16px;
+  padding: 0;
+}
+
+.quality-rejection-list li {
+  margin: 0 0 4px;
+  font: 600 0.72rem/1.2 "DM Sans", sans-serif;
+  color: #3c3c3c;
+}
+
 .quality-card.done {
   border-left-color: #1a9f7d;
   background: #dff7ef;
+}
+
+.quality-reject-editor {
+  margin-top: 8px;
+  padding: 8px;
+  border: 1px solid #d8d8d8;
+  background: #f7f7f7;
+}
+
+.quality-reject-editor.hidden {
+  display: none;
+}
+
+.quality-reject-grid {
+  display: grid;
+  gap: 8px;
+}
+
+.quality-field {
+  display: grid;
+  gap: 4px;
+}
+
+.quality-field span {
+  font: 700 0.68rem/1 "DM Sans", sans-serif;
+  color: #3d3d3d;
+  text-transform: uppercase;
+}
+
+.quality-field select,
+.quality-field input {
+  width: 100%;
+  border: 1px solid #cccccc;
+  background: #fff;
+  color: #111;
+  padding: 7px 8px;
+  font: 600 0.75rem/1.2 "DM Sans", sans-serif;
+}
+
+.quality-field textarea {
+  width: 100%;
+  border: 1px solid #cccccc;
+  background: #fff;
+  color: #111;
+  padding: 7px 8px;
+  font: 600 0.75rem/1.2 "DM Sans", sans-serif;
+  resize: vertical;
+  min-height: 56px;
+}
+
+.quality-observation-wrap.hidden {
+  display: none;
 }
 
 .top-layout-spacer {

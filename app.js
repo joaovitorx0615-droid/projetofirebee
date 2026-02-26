@@ -9,6 +9,38 @@ const DISPLAY_YEAR = 2026;
 const AUTO_REFRESH_MS = 10000;
 const DAILY_STORAGE_KEY = "daily-production-progress";
 const PRODUCTION_HISTORY_KEY = "production-history";
+const QUALITY_REJECTION_CATEGORIES = [
+  { value: "montagem", label: "Montagem" },
+  { value: "fabrica", label: "Defeito da fabrica" },
+];
+const QUALITY_DIVERSE_REASON = "DIVERSO";
+const QUALITY_REJECTION_REASONS = [
+  "LED VERMELHO",
+  "LED AZUL",
+  "LED AMARELO",
+  "CAMARA SUJA",
+  "SENSOR REMOVIDO",
+  "DISPARO",
+  "SINAL",
+  "NAO LIGA",
+  "PINOS TAMPA-RIF",
+  "BATERIA",
+  "MODO BATERIA",
+  "TEMPERATURA",
+  "BASE QUEBRADA",
+  "ROSCA ESPANADA",
+  "ACRILICO INVERTIDO - TAMPA RIF",
+  "PLACA INVERTIDA - TAMPA RIF",
+  "REDE AC",
+  "SEM PLACA",
+  "ADESIVO",
+  "RADIO",
+  QUALITY_DIVERSE_REASON,
+];
+const QUALITY_REJECTION_REASONS_BY_CATEGORY = {
+  montagem: QUALITY_REJECTION_REASONS,
+  fabrica: QUALITY_REJECTION_REASONS,
+};
 
 const elements = {
   tableHead: document.querySelector("#data-table thead"),
@@ -58,6 +90,7 @@ let selectedRow = null;
 let dailyProgress = {};
 let editingDeviceKey = "";
 let qualityPanelOpen = false;
+let qualityRejectEditorKey = "";
 const COMPLETED_HIDE_AFTER_MS = 24 * 60 * 60 * 1000;
 let productionHistory = {};
 
@@ -68,6 +101,105 @@ function parseNumber(value) {
 
 function formatNumber(value) {
   return new Intl.NumberFormat("pt-BR").format(value);
+}
+
+function escapeHtml(value) {
+  return String(value ?? "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#39;");
+}
+
+function normalizeRejectionReason(progress) {
+  const category = String(progress?.rejectionCategory || "").trim().toLowerCase();
+  const reason = String(progress?.rejectionReason || "").trim();
+  const isValidCategory = QUALITY_REJECTION_CATEGORIES.some((item) => item.value === category);
+  const resolvedCategory = isValidCategory ? category : QUALITY_REJECTION_CATEGORIES[0].value;
+  const categoryReasons = QUALITY_REJECTION_REASONS_BY_CATEGORY[resolvedCategory] || [];
+  const isValidReason = categoryReasons.includes(reason);
+  const observation = String(progress?.rejectionObservation || "").trim();
+  return {
+    category: resolvedCategory,
+    reason: isValidReason ? reason : categoryReasons[0] || "",
+    observation,
+  };
+}
+
+function getRejectionCategoryLabel(value) {
+  const found = QUALITY_REJECTION_CATEGORIES.find((item) => item.value === value);
+  return found ? found.label : "Nao informado";
+}
+
+function buildRejectionReasonOptions(category, selectedReason) {
+  const reasons = QUALITY_REJECTION_REASONS_BY_CATEGORY[category] || [];
+  return reasons
+    .map(
+      (reason) =>
+        `<option value="${escapeHtml(reason)}"${selectedReason === reason ? " selected" : ""}>${escapeHtml(reason)}</option>`
+    )
+    .join("");
+}
+
+function isObservationRequired(reason) {
+  return String(reason || "").trim() === QUALITY_DIVERSE_REASON;
+}
+
+function normalizeRejectionEntries(progress) {
+  const rawEntries = Array.isArray(progress?.rejectionEntries) ? progress.rejectionEntries : [];
+  const entries = rawEntries
+    .map((entry) => {
+      const normalized = normalizeRejectionReason({
+        rejectionCategory: entry?.category,
+        rejectionReason: entry?.reason,
+        rejectionObservation: entry?.observation,
+      });
+      const count = Math.max(parseNumber(entry?.count), 0);
+      if (!count) return null;
+      return {
+        category: normalized.category,
+        reason: normalized.reason,
+        observation: normalized.observation,
+        count,
+      };
+    })
+    .filter(Boolean);
+
+  if (entries.length) return entries;
+
+  const legacy = normalizeRejectionReason(progress);
+  const legacyCount = Math.max(parseNumber(progress?.rejected), 0);
+  if (!legacyCount) return [];
+  return [
+    {
+      category: legacy.category,
+      reason: legacy.reason,
+      observation: legacy.observation,
+      count: legacyCount,
+    },
+  ];
+}
+
+function getRejectedTotalFromEntries(entries) {
+  return (entries || []).reduce((sum, entry) => sum + Math.max(parseNumber(entry?.count), 0), 0);
+}
+
+function getProgressRejectedTotal(progress) {
+  return getRejectedTotalFromEntries(normalizeRejectionEntries(progress));
+}
+
+function buildRejectionEntriesHtml(entries) {
+  if (!entries.length) return "<p>Motivos: <strong>Nenhum</strong></p>";
+  const items = entries
+    .map((entry) => {
+      const obs = entry.observation ? ` (${escapeHtml(entry.observation)})` : "";
+      return `<li>${escapeHtml(getRejectionCategoryLabel(entry.category))} - ${escapeHtml(entry.reason)}: <strong>${formatNumber(
+        entry.count
+      )}</strong>${obs}</li>`;
+    })
+    .join("");
+  return `<p>Motivos registrados:</p><ul class="quality-rejection-list">${items}</ul>`;
 }
 
 function buildRowKey(row) {
@@ -671,12 +803,27 @@ function renderQualityPanel() {
       const [sigla, codigo] = key.split("__");
       const target = parseNumber(progress?.target);
       const done = parseNumber(progress?.done);
-      const rejected = parseNumber(progress?.rejected);
+      const rejectionEntries = normalizeRejectionEntries(progress);
+      const rejected = getRejectedTotalFromEntries(rejectionEntries);
       const remaining = Math.max(target - done, 0);
       const isDone = target > 0 && remaining === 0;
       const testedAt = progress?.testedAt || null;
       const productionFinalizedAt = progress?.productionFinalizedAt || null;
-      return { key, sigla, codigo, target, done, rejected, remaining, isDone, testedAt, productionFinalizedAt };
+      const rejectionReason = normalizeRejectionReason(progress);
+      return {
+        key,
+        sigla,
+        codigo,
+        target,
+        done,
+        rejected,
+        remaining,
+        isDone,
+        testedAt,
+        productionFinalizedAt,
+        rejectionReason,
+        rejectionEntries,
+      };
     })
     .filter((item) => item.productionFinalizedAt && !item.testedAt);
 
@@ -685,26 +832,68 @@ function renderQualityPanel() {
       const [sigla, codigo] = key.split("__");
       const target = parseNumber(progress?.target);
       const done = parseNumber(progress?.done);
-      const rejected = parseNumber(progress?.rejected);
+      const rejectionEntries = normalizeRejectionEntries(progress);
+      const rejected = getRejectedTotalFromEntries(rejectionEntries);
       const testedAt = progress?.testedAt || null;
       const productionFinalizedAt = progress?.productionFinalizedAt || null;
-      return { key, sigla, codigo, target, done, rejected, testedAt, productionFinalizedAt };
+      const rejectionReason = normalizeRejectionReason(progress);
+      return { key, sigla, codigo, target, done, rejected, testedAt, productionFinalizedAt, rejectionReason, rejectionEntries };
     })
     .filter((item) => item.productionFinalizedAt && item.testedAt);
 
   elements.qualityAwaitingList.innerHTML = waitingTestEntries.length
     ? waitingTestEntries
         .map(
-          (item) => `<article class="quality-card" data-key="${item.key}">
+          (item) => {
+            const isEditingReject = qualityRejectEditorKey === item.key;
+            const reasonOptions = buildRejectionReasonOptions(item.rejectionReason.category, item.rejectionReason.reason);
+            return `<article class="quality-card" data-key="${item.key}">
       <h4>${item.sigla}</h4>
       <p>Codigo: <strong>${item.codigo}</strong></p>
       <p>Produzido: <strong>${formatNumber(item.done)}</strong> / ${formatNumber(item.target)}</p>
       <p>Reprovado: <strong>${formatNumber(item.rejected)}</strong></p>
+      ${buildRejectionEntriesHtml(item.rejectionEntries)}
       <div class="saved-actions">
-        <button type="button" class="saved-action-btn saved-reject-btn" data-action="quality-reject" data-key="${item.key}">Reprovado</button>
+        <button type="button" class="saved-action-btn saved-reject-btn" data-action="quality-reject-open" data-key="${item.key}">Reprovado</button>
         <button type="button" class="saved-action-btn saved-save-btn" data-action="quality-complete" data-key="${item.key}">Teste concluido</button>
       </div>
-    </article>`
+      <div class="quality-reject-editor${isEditingReject ? "" : " hidden"}" data-reject-editor-for="${item.key}">
+        <div class="quality-reject-grid">
+          <label class="quality-field">
+            <span>Categoria</span>
+            <select class="quality-category-select">
+              ${QUALITY_REJECTION_CATEGORIES.map(
+                (category) =>
+                  `<option value="${category.value}"${
+                    item.rejectionReason.category === category.value ? " selected" : ""
+                  }>${escapeHtml(category.label)}</option>`
+              ).join("")}
+            </select>
+          </label>
+          <label class="quality-field">
+            <span>Motivo</span>
+            <select class="quality-reason-select">
+              ${reasonOptions}
+            </select>
+          </label>
+          <label class="quality-field">
+            <span>Qtd. deste motivo</span>
+            <input class="quality-reject-count-input" type="number" min="0" step="1" value="1" />
+          </label>
+          <label class="quality-field quality-observation-wrap${isObservationRequired(item.rejectionReason.reason) ? "" : " hidden"}">
+            <span>Observacao (obrigatoria para Diverso)</span>
+            <textarea class="quality-observation-input" rows="2" placeholder="Descreva o motivo diverso...">${escapeHtml(
+              item.rejectionReason.observation
+            )}</textarea>
+          </label>
+        </div>
+        <div class="saved-actions">
+          <button type="button" class="saved-action-btn saved-cancel-btn" data-action="quality-reject-cancel" data-key="${item.key}">Cancelar</button>
+          <button type="button" class="saved-action-btn saved-save-btn" data-action="quality-reject-save" data-key="${item.key}">Adicionar motivo</button>
+        </div>
+      </div>
+    </article>`;
+          }
         )
     .join("")
     : `<div class="devices-empty">Nenhum item aguardando teste.</div>`;
@@ -718,6 +907,7 @@ function renderQualityPanel() {
       <p>Codigo: <strong>${item.codigo}</strong></p>
       <p>Produzido: <strong>${formatNumber(item.done)}</strong> / ${formatNumber(item.target)}</p>
       <p>Reprovado: <strong>${formatNumber(item.rejected)}</strong></p>
+      ${buildRejectionEntriesHtml(item.rejectionEntries)}
       <span class="saved-tag">Teste concluido</span>
     </article>`
         )
@@ -729,28 +919,43 @@ function renderQualityPanel() {
 
 function renderQualityRejectedIndicator() {
   if (!elements.qualityRejectedChart || typeof Chart === "undefined") return;
-  const totalRejected = Object.values(dailyProgress).reduce(
-    (sum, item) => sum + parseNumber(item?.rejected),
-    0
-  );
-  const totalApproved = Object.values(dailyProgress).reduce((sum, item) => {
-    const done = parseNumber(item?.done);
-    const rejected = parseNumber(item?.rejected);
-    return sum + Math.max(done - rejected, 0);
-  }, 0);
+  const deviceStats = Object.entries(dailyProgress)
+    .map(([key, item]) => {
+      const [sigla, codigo] = key.split("__");
+      const done = parseNumber(item?.done);
+      const rejected = getProgressRejectedTotal(item);
+      const approved = Math.max(done - rejected, 0);
+      return {
+        label: `${sigla} (${codigo})`,
+        rejected,
+        approved,
+      };
+    })
+    .filter((item) => item.rejected > 0 || item.approved > 0);
+
+  const labels = deviceStats.length ? deviceStats.map((item) => item.label) : ["Sem dados"];
+  const rejectedValues = deviceStats.length ? deviceStats.map((item) => item.rejected) : [0];
+  const approvedValues = deviceStats.length ? deviceStats.map((item) => item.approved) : [0];
 
   if (qualityRejectedChartInstance) {
     qualityRejectedChartInstance.destroy();
   }
 
   qualityRejectedChartInstance = new Chart(elements.qualityRejectedChart, {
-    type: "doughnut",
+    type: "bar",
     data: {
-      labels: ["Reprovado", "Aprovado"],
+      labels,
       datasets: [
         {
-          data: [totalRejected, totalApproved || 0.0001],
-          backgroundColor: ["#d14d4d", "#1a9f7d"],
+          label: "Reprovado",
+          data: rejectedValues,
+          backgroundColor: "#d14d4d",
+          borderWidth: 0,
+        },
+        {
+          label: "Aprovado",
+          data: approvedValues,
+          backgroundColor: "#1a9f7d",
           borderWidth: 0,
         },
       ],
@@ -764,15 +969,25 @@ function renderQualityRejectedIndicator() {
           position: "bottom",
           labels: { boxWidth: 10, boxHeight: 10, font: { size: 11 } },
         },
-        tooltip: {
-          callbacks: {
-            label(context) {
-              return `${context.label}: ${formatNumber(context.parsed || 0)}`;
+      },
+      scales: {
+        x: {
+          stacked: true,
+          ticks: {
+            maxRotation: 35,
+            minRotation: 0,
+          },
+        },
+        y: {
+          stacked: true,
+          beginAtZero: true,
+          ticks: {
+            callback(value) {
+              return formatNumber(value);
             },
           },
         },
       },
-      cutout: "64%",
     },
   });
 }
@@ -954,6 +1169,7 @@ function bindEvents() {
       const action = actionBtn.dataset.action;
       const key = actionBtn.dataset.key;
       if (!key || !dailyProgress[key]) return;
+      const card = actionBtn.closest(".quality-card");
 
       if (action === "quality-complete") {
         dailyProgress[key] = {
@@ -972,15 +1188,63 @@ function bindEvents() {
         return;
       }
 
-      if (action === "quality-reject") {
+      if (action === "quality-reject-open") {
+        qualityRejectEditorKey = key;
+        renderQualityPanel();
+        return;
+      }
+
+      if (action === "quality-reject-cancel") {
+        qualityRejectEditorKey = "";
+        renderQualityPanel();
+        return;
+      }
+
+      if (action === "quality-reject-save") {
+        if (!card) return;
+        const categorySelect = card.querySelector(".quality-category-select");
+        const reasonSelect = card.querySelector(".quality-reason-select");
+        const rejectedInput = card.querySelector(".quality-reject-count-input");
+        const observationInput = card.querySelector(".quality-observation-input");
+        const category = String(categorySelect?.value || "").trim().toLowerCase();
+        const reason = String(reasonSelect?.value || "").trim();
+        const observation = String(observationInput?.value || "").trim();
+        const allowedReasons = QUALITY_REJECTION_REASONS_BY_CATEGORY[category] || [];
+
+        if (!QUALITY_REJECTION_CATEGORIES.some((item) => item.value === category)) {
+          window.alert("Selecione uma categoria valida para a reprovacao.");
+          return;
+        }
+        if (!allowedReasons.includes(reason)) {
+          window.alert("Selecione um motivo valido para a reprovacao.");
+          return;
+        }
+        if (isObservationRequired(reason) && !observation) {
+          window.alert("Informe a observacao para motivo diverso.");
+          return;
+        }
+
         const current = dailyProgress[key] || {};
-        const currentRejected = parseNumber(current.rejected);
-        const raw = window.prompt("Informe a quantidade reprovada no teste:", String(currentRejected));
-        if (raw === null) return;
-        const rejected = Math.max(parseNumber(raw), 0);
+        const newRejectedCount = Math.max(parseNumber(rejectedInput?.value), 0);
+        if (!newRejectedCount) {
+          window.alert("Informe uma quantidade maior que zero.");
+          return;
+        }
+        const rejectionEntries = normalizeRejectionEntries(current);
+        rejectionEntries.push({
+          category,
+          reason,
+          observation,
+          count: newRejectedCount,
+        });
+        const rejected = getRejectedTotalFromEntries(rejectionEntries);
         dailyProgress[key] = {
           ...current,
           rejected,
+          rejectionEntries,
+          rejectionCategory: category,
+          rejectionReason: reason,
+          rejectionObservation: observation,
           testedAt: null,
         };
         saveDailyProgress();
@@ -995,9 +1259,45 @@ function bindEvents() {
           target: parseNumber(dailyProgress[key]?.target),
           done: parseNumber(dailyProgress[key]?.done),
           rejected,
+          rejectionCategory: category,
+          rejectionReason: reason,
+          rejectionObservation: observation,
+          rejectionAddedCount: newRejectedCount,
         });
+        if (rejectedInput) rejectedInput.value = "1";
+        if (observationInput) observationInput.value = "";
+        qualityRejectEditorKey = key;
         renderSavedDevices();
         renderQualityPanel();
+      }
+    });
+    elements.qualityAwaitingList.addEventListener("change", (event) => {
+      const categorySelect = event.target.closest(".quality-category-select");
+      const reasonSelectChanged = event.target.closest(".quality-reason-select");
+
+      if (categorySelect) {
+        const card = categorySelect.closest(".quality-card");
+        if (!card) return;
+        const reasonSelect = card.querySelector(".quality-reason-select");
+        const observationWrap = card.querySelector(".quality-observation-wrap");
+        if (!reasonSelect || !observationWrap) return;
+        const category = String(categorySelect.value || "").trim().toLowerCase();
+        const currentReason = String(reasonSelect.value || "").trim();
+        const reasons = QUALITY_REJECTION_REASONS_BY_CATEGORY[category] || [];
+        const selectedReason = reasons.includes(currentReason) ? currentReason : reasons[0] || "";
+        reasonSelect.innerHTML = buildRejectionReasonOptions(category, selectedReason);
+        reasonSelect.value = selectedReason;
+        observationWrap.classList.toggle("hidden", !isObservationRequired(selectedReason));
+        return;
+      }
+
+      if (reasonSelectChanged) {
+        const card = reasonSelectChanged.closest(".quality-card");
+        if (!card) return;
+        const observationWrap = card.querySelector(".quality-observation-wrap");
+        if (!observationWrap) return;
+        const selectedReason = String(reasonSelectChanged.value || "").trim();
+        observationWrap.classList.toggle("hidden", !isObservationRequired(selectedReason));
       }
     });
   }

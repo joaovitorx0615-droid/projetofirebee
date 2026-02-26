@@ -6,7 +6,8 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "dev": "nodemon server.js"
+    "dev": "nodemon server.js",
+    "db:check": "node scripts/check-db.js"
   },
   "devDependencies": {
     "nodemon": "^3.1.14"
