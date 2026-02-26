@@ -83,21 +83,34 @@ body {
   top: 12px;
   left: 12px;
   z-index: 60;
-  border: 0;
-  background: #131313;
+  border: 1px solid #2f2f2f;
+  border-radius: 999px;
+  background: linear-gradient(135deg, #111111 0%, #2a2a2a 100%);
   color: #fff;
-  padding: 8px 12px;
-  font: 700 0.8rem "DM Sans", sans-serif;
+  padding: 10px 16px;
+  min-height: 42px;
+  font: 800 0.9rem/1 "DM Sans", sans-serif;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
   cursor: pointer;
+  box-shadow: 0 8px 20px rgba(0, 0, 0, 0.22);
+  transition: transform 0.18s ease, box-shadow 0.18s ease, filter 0.18s ease;
+}
+
+.quality-toggle-btn:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 10px 24px rgba(0, 0, 0, 0.26);
+  filter: brightness(1.04);
 }
 
 .quality-toggle-btn.active {
-  background: #0f8f6f;
+  border-color: #0f8f6f;
+  background: linear-gradient(135deg, #0f8f6f 0%, #13a07d 100%);
 }
 
 .quality-panel {
   position: fixed;
-  top: 48px;
+  top: 60px;
   left: 12px;
   width: min(360px, calc(100vw - 24px));
   max-height: min(72vh, 620px);
@@ -192,6 +205,25 @@ body {
 .quality-card.done {
   border-left-color: #1a9f7d;
   background: #dff7ef;
+}
+
+.quality-toggle-btn.attention-blink {
+  animation: qualityAlertPulse 0.95s ease-in-out infinite;
+}
+
+@keyframes qualityAlertPulse {
+  0% {
+    transform: scale(1);
+    box-shadow: 0 8px 20px rgba(0, 0, 0, 0.22), 0 0 0 0 rgba(255, 175, 32, 0.45);
+  }
+  50% {
+    transform: scale(1.035);
+    box-shadow: 0 10px 26px rgba(0, 0, 0, 0.28), 0 0 0 8px rgba(255, 175, 32, 0);
+  }
+  100% {
+    transform: scale(1);
+    box-shadow: 0 8px 20px rgba(0, 0, 0, 0.22), 0 0 0 0 rgba(255, 175, 32, 0);
+  }
 }
 
 .quality-reject-editor {
@@ -564,7 +596,7 @@ h1 {
 .trends-card {
   padding: 8px;
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 8px;
   min-height: 0;
 }
@@ -577,6 +609,15 @@ h1 {
   display: grid;
   grid-template-rows: auto minmax(0, 1fr);
   gap: 4px;
+}
+
+.quality-history-box {
+  min-width: 0;
+}
+
+.quality-history-box .quality-indicator-wrap {
+  height: 100%;
+  min-height: 120px;
 }
 
 .trend-box h3 {
@@ -817,7 +858,7 @@ tbody tr:hover {
   }
 
   .trends-card {
-    grid-template-columns: 1fr;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .production-panel {
@@ -840,6 +881,10 @@ tbody tr:hover {
   }
 
   .production-panel {
+    grid-template-columns: 1fr;
+  }
+
+  .trends-card {
     grid-template-columns: 1fr;
   }
 }

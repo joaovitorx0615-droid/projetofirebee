@@ -6,9 +6,12 @@ const HISTORY_ENTRY_ENDPOINT = "/api/production-history-entry";
 const AUDIT_ENDPOINT = "/api/audit-event";
 const MONTHS = ["Jan", "Fev", "Mar", "Abr", "Mai", "Jun", "Jul", "Ago", "Set", "Out", "Nov", "Dez"];
 const DISPLAY_YEAR = 2026;
-const AUTO_REFRESH_MS = 10000;
+const AUTO_REFRESH_MS = 30000;
 const DAILY_STORAGE_KEY = "daily-production-progress";
 const PRODUCTION_HISTORY_KEY = "production-history";
+const FINAL_PRODUCTS_STORAGE_KEY = "final-products-history";
+const EXCLUDED_PRODUCTS_STORAGE_KEY = "excluded-products-history";
+const USER_INTERACTION_GRACE_MS = 45000;
 const QUALITY_REJECTION_CATEGORIES = [
   { value: "montagem", label: "Montagem" },
   { value: "fabrica", label: "Defeito da fabrica" },
@@ -93,6 +96,10 @@ let qualityPanelOpen = false;
 let qualityRejectEditorKey = "";
 const COMPLETED_HIDE_AFTER_MS = 24 * 60 * 60 * 1000;
 let productionHistory = {};
+let finalProductsHistory = {};
+let excludedProductsHistory = [];
+let autoRefreshInFlight = false;
+let lastUserInteractionAt = Date.now();
 
 function parseNumber(value) {
   const num = Number(String(value ?? "").replace(",", ".").trim());
@@ -189,6 +196,46 @@ function getProgressRejectedTotal(progress) {
   return getRejectedTotalFromEntries(normalizeRejectionEntries(progress));
 }
 
+function buildDeviceQualityHistoryStats() {
+  const aggregate = {};
+  Object.entries(productionHistory || {}).forEach(([dateKey, dayData]) => {
+    if (!dayData || typeof dayData !== "object") return;
+    Object.entries(dayData).forEach(([deviceKey, values]) => {
+      if (isHistoryEntryExcluded(dateKey, deviceKey)) return;
+      if (!aggregate[deviceKey]) {
+        aggregate[deviceKey] = {
+          done: 0,
+          rejected: 0,
+          days: 0,
+        };
+      }
+      const done = Math.max(parseNumber(values?.done), 0);
+      const rejected = Math.max(parseNumber(values?.rejected), 0);
+      aggregate[deviceKey].done += done;
+      aggregate[deviceKey].rejected += rejected;
+      aggregate[deviceKey].days += 1;
+    });
+  });
+
+  return Object.entries(aggregate)
+    .map(([deviceKey, item]) => {
+      const [sigla, codigo] = deviceKey.split("__");
+      const avgErrorPercent = item.done > 0 ? (item.rejected / item.done) * 100 : 0;
+      const avgRejectedPerDay = item.days > 0 ? item.rejected / item.days : 0;
+      return {
+        deviceKey,
+        label: `${sigla}`,
+        avgErrorPercent,
+        avgRejectedPerDay,
+        rejectedTotal: item.rejected,
+        doneTotal: item.done,
+        days: item.days,
+      };
+    })
+    .filter((item) => item.rejectedTotal > 0)
+    .sort((a, b) => b.avgErrorPercent - a.avgErrorPercent || b.rejectedTotal - a.rejectedTotal);
+}
+
 function buildRejectionEntriesHtml(entries) {
   if (!entries.length) return "<p>Motivos: <strong>Nenhum</strong></p>";
   const items = entries
@@ -238,6 +285,81 @@ function saveProductionHistory() {
     localStorage.setItem(PRODUCTION_HISTORY_KEY, JSON.stringify(productionHistory));
   } catch (error) {
     // Ignora falha de persistencia.
+  }
+}
+
+function loadFinalProductsHistory() {
+  try {
+    const raw = localStorage.getItem(FINAL_PRODUCTS_STORAGE_KEY);
+    const parsed = raw ? JSON.parse(raw) : {};
+    finalProductsHistory = parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+  } catch (error) {
+    finalProductsHistory = {};
+  }
+}
+
+function saveFinalProductsHistory() {
+  try {
+    localStorage.setItem(FINAL_PRODUCTS_STORAGE_KEY, JSON.stringify(finalProductsHistory));
+  } catch (error) {
+    // Ignora falha de persistencia.
+  }
+}
+
+function loadExcludedProductsHistory() {
+  try {
+    const raw = localStorage.getItem(EXCLUDED_PRODUCTS_STORAGE_KEY);
+    const parsed = raw ? JSON.parse(raw) : [];
+    excludedProductsHistory = Array.isArray(parsed) ? parsed : [];
+  } catch (error) {
+    excludedProductsHistory = [];
+  }
+}
+
+function saveExcludedProductsHistory() {
+  try {
+    localStorage.setItem(EXCLUDED_PRODUCTS_STORAGE_KEY, JSON.stringify(excludedProductsHistory));
+  } catch (error) {
+    // Ignora falha de persistencia.
+  }
+}
+
+function buildExcludedEntryKey(dateKey, deviceKey) {
+  return `${String(dateKey || "").trim()}__${String(deviceKey || "").trim()}`;
+}
+
+function isHistoryEntryExcluded(dateKey, deviceKey) {
+  const key = buildExcludedEntryKey(dateKey, deviceKey);
+  return excludedProductsHistory.some((item) => buildExcludedEntryKey(item?.dateKey, item?.key) === key);
+}
+
+function registerExcludedProductRecord(key, progress, origin) {
+  if (!key) return;
+  const [sigla, codigo] = String(key).split("__");
+  const now = new Date();
+  const sourceDate = progress?.testedAt || progress?.completedAt || progress?.productionFinalizedAt || now.toISOString();
+  const dateKey = toLocalDateKey(new Date(sourceDate));
+  const record = {
+    id: `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+    key,
+    sigla: String(sigla || ""),
+    codigo: String(codigo || ""),
+    target: parseNumber(progress?.target),
+    done: parseNumber(progress?.done),
+    rejected: getProgressRejectedTotal(progress),
+    dateKey,
+    origin: String(origin || "manual_delete"),
+    excludedAt: now.toISOString(),
+  };
+  excludedProductsHistory.push(record);
+  saveExcludedProductsHistory();
+
+  if (productionHistory[dateKey] && productionHistory[dateKey][key]) {
+    delete productionHistory[dateKey][key];
+    if (Object.keys(productionHistory[dateKey]).length === 0) {
+      delete productionHistory[dateKey];
+    }
+    saveProductionHistory();
   }
 }
 
@@ -388,22 +510,46 @@ function applyCompletionState(progress) {
 }
 
 function pruneExpiredCompletedDevices() {
-  const now = Date.now();
-  let changed = false;
+  // Mantem historico de finalizados sem expurgo automatico.
+}
 
-  Object.keys(dailyProgress).forEach((key) => {
-    const progress = dailyProgress[key];
-    if (!progress?.testedAt) return;
-    const testedAtTs = new Date(progress.testedAt).getTime();
-    if (!Number.isFinite(testedAtTs)) return;
-    if (now - testedAtTs >= COMPLETED_HIDE_AFTER_MS) {
-      delete dailyProgress[key];
+function buildFinalProductRecord(key, progress) {
+  const [sigla, codigo] = String(key || "").split("__");
+  const target = parseNumber(progress?.target);
+  const done = parseNumber(progress?.done);
+  const rejected = getProgressRejectedTotal(progress);
+  const remaining = Math.max(target - done, 0);
+  return {
+    key,
+    sigla: String(sigla || ""),
+    codigo: String(codigo || ""),
+    target,
+    done,
+    rejected,
+    remaining,
+    productionFinalizedAt: progress?.productionFinalizedAt || null,
+    testedAt: progress?.testedAt || null,
+    completedAt: progress?.completedAt || null,
+    updatedAt: new Date().toISOString(),
+  };
+}
+
+function syncFinalProductsFromDailyProgress() {
+  let changed = false;
+  Object.entries(dailyProgress || {}).forEach(([key, progress]) => {
+    if (!progress?.productionFinalizedAt || !progress?.testedAt) return;
+    const nextRecord = buildFinalProductRecord(key, progress);
+    const prevRecord = finalProductsHistory[key];
+    const prevSignature = JSON.stringify(prevRecord || {});
+    const nextSignature = JSON.stringify(nextRecord);
+    if (prevSignature !== nextSignature) {
+      finalProductsHistory[key] = nextRecord;
       changed = true;
     }
   });
 
   if (changed) {
-    saveDailyProgress();
+    saveFinalProductsHistory();
   }
 }
 
@@ -492,7 +638,10 @@ function renderProducedCharts(rows, monthlyTotals, totalAnual, peakValue) {
       d.setDate(d.getDate() - i);
       const key = toLocalDateKey(d);
       const dayData = productionHistory[key] || {};
-      const totalDay = Object.values(dayData).reduce((acc, item) => acc + parseNumber(item?.done), 0);
+      const totalDay = Object.entries(dayData).reduce((acc, [deviceKey, item]) => {
+        if (isHistoryEntryExcluded(key, deviceKey)) return acc;
+        return acc + parseNumber(item?.done);
+      }, 0);
       labels.push(`${String(d.getDate()).padStart(2, "0")}/${String(d.getMonth() + 1).padStart(2, "0")}`);
       values.push(totalDay);
     }
@@ -539,7 +688,10 @@ function renderProducedCharts(rows, monthlyTotals, totalAnual, peakValue) {
       if (!dateKey.startsWith(String(currentYear))) return;
       const month = Number(dateKey.slice(5, 7)) - 1;
       if (month < 0 || month > 11) return;
-      const totalDay = Object.values(dayData || {}).reduce((acc, item) => acc + parseNumber(item?.done), 0);
+      const totalDay = Object.entries(dayData || {}).reduce((acc, [deviceKey, item]) => {
+        if (isHistoryEntryExcluded(dateKey, deviceKey)) return acc;
+        return acc + parseNumber(item?.done);
+      }, 0);
       monthlyProduced[month] += totalDay;
     });
 
@@ -579,7 +731,10 @@ function renderProducedCharts(rows, monthlyTotals, totalAnual, peakValue) {
     const annualTotals = {};
     Object.entries(productionHistory).forEach(([dateKey, dayData]) => {
       const year = dateKey.slice(0, 4);
-      const totalDay = Object.values(dayData || {}).reduce((acc, item) => acc + parseNumber(item?.done), 0);
+      const totalDay = Object.entries(dayData || {}).reduce((acc, [deviceKey, item]) => {
+        if (isHistoryEntryExcluded(dateKey, deviceKey)) return acc;
+        return acc + parseNumber(item?.done);
+      }, 0);
       annualTotals[year] = (annualTotals[year] || 0) + totalDay;
     });
     const years = Object.keys(annualTotals).sort();
@@ -721,6 +876,7 @@ function renderSiglaButtons(rows) {
 function renderSavedDevices() {
   if (!elements.savedDevices && !elements.doneDevices) return;
   pruneExpiredCompletedDevices();
+  syncFinalProductsFromDailyProgress();
 
   const savedEntries = Object.entries(dailyProgress)
     .map(([key, progress]) => {
@@ -738,7 +894,13 @@ function renderSavedDevices() {
     .filter((item) => item.target > 0 || item.done > 0);
 
   const inProgressEntries = savedEntries.filter((item) => !item.productionFinalizedAt);
-  const doneEntries = savedEntries.filter((item) => item.productionFinalizedAt && item.testedAt);
+  const doneEntries = Object.values(finalProductsHistory)
+    .filter((item) => item && item.productionFinalizedAt && item.testedAt)
+    .sort((a, b) => {
+      const aTime = new Date(a.testedAt || a.updatedAt || 0).getTime();
+      const bTime = new Date(b.testedAt || b.updatedAt || 0).getTime();
+      return bTime - aTime;
+    });
 
   elements.savedDevices.innerHTML = inProgressEntries.length
     ? inProgressEntries
@@ -779,7 +941,24 @@ function renderSavedDevices() {
   elements.doneDevices.innerHTML = doneEntries.length
     ? doneEntries
         .map(
-          (item) => `<article class="saved-card done" data-key="${item.key}">
+          (item) => {
+            const isEditing = editingDeviceKey === item.key;
+            if (isEditing) {
+              return `<article class="saved-card done" data-key="${item.key}">
+      <h4>${item.sigla}</h4>
+      <label class="saved-label">A produzir</label>
+      <input class="saved-input saved-target-input" type="number" min="0" step="1" value="${item.target}" />
+      <label class="saved-label">Produzido</label>
+      <input class="saved-input saved-done-input" type="number" min="0" step="1" value="${item.done}" />
+      <label class="saved-label">Reprovado</label>
+      <input class="saved-input saved-rejected-input" type="number" min="0" step="1" value="${item.rejected}" />
+      <div class="saved-actions">
+        <button type="button" class="saved-action-btn saved-cancel-btn" data-action="cancel" data-key="${item.key}">Cancelar</button>
+        <button type="button" class="saved-action-btn saved-save-btn" data-action="save" data-key="${item.key}">Salvar</button>
+      </div>
+    </article>`;
+            }
+            return `<article class="saved-card done" data-key="${item.key}">
       <h4>${item.sigla}</h4>
       <p>A produzir: <strong>${formatNumber(item.target)}</strong></p>
       <p>Produzido: <strong>${formatNumber(item.done)}</strong></p>
@@ -788,9 +967,9 @@ function renderSavedDevices() {
       <span class="saved-tag">Finalizado</span>
       <div class="saved-actions">
         <button type="button" class="saved-action-btn saved-edit-btn" data-action="edit" data-key="${item.key}">Editar</button>
-        <button type="button" class="saved-action-btn saved-delete-btn" data-action="delete" data-key="${item.key}">Excluir</button>
       </div>
-    </article>`
+    </article>`;
+          }
         )
         .join("")
     : `<div class="devices-empty">Nenhum item finalizado.</div>`;
@@ -840,6 +1019,10 @@ function renderQualityPanel() {
       return { key, sigla, codigo, target, done, rejected, testedAt, productionFinalizedAt, rejectionReason, rejectionEntries };
     })
     .filter((item) => item.productionFinalizedAt && item.testedAt);
+
+  if (elements.qualityToggleBtn) {
+    elements.qualityToggleBtn.classList.toggle("attention-blink", waitingTestEntries.length > 0);
+  }
 
   elements.qualityAwaitingList.innerHTML = waitingTestEntries.length
     ? waitingTestEntries
@@ -919,23 +1102,9 @@ function renderQualityPanel() {
 
 function renderQualityRejectedIndicator() {
   if (!elements.qualityRejectedChart || typeof Chart === "undefined") return;
-  const deviceStats = Object.entries(dailyProgress)
-    .map(([key, item]) => {
-      const [sigla, codigo] = key.split("__");
-      const done = parseNumber(item?.done);
-      const rejected = getProgressRejectedTotal(item);
-      const approved = Math.max(done - rejected, 0);
-      return {
-        label: `${sigla} (${codigo})`,
-        rejected,
-        approved,
-      };
-    })
-    .filter((item) => item.rejected > 0 || item.approved > 0);
-
+  const deviceStats = buildDeviceQualityHistoryStats();
   const labels = deviceStats.length ? deviceStats.map((item) => item.label) : ["Sem dados"];
-  const rejectedValues = deviceStats.length ? deviceStats.map((item) => item.rejected) : [0];
-  const approvedValues = deviceStats.length ? deviceStats.map((item) => item.approved) : [0];
+  const errorPercentValues = deviceStats.length ? deviceStats.map((item) => Number(item.avgErrorPercent.toFixed(2))) : [0];
 
   if (qualityRejectedChartInstance) {
     qualityRejectedChartInstance.destroy();
@@ -947,15 +1116,9 @@ function renderQualityRejectedIndicator() {
       labels,
       datasets: [
         {
-          label: "Reprovado",
-          data: rejectedValues,
+          label: "Erro medio (%)",
+          data: errorPercentValues,
           backgroundColor: "#d14d4d",
-          borderWidth: 0,
-        },
-        {
-          label: "Aprovado",
-          data: approvedValues,
-          backgroundColor: "#1a9f7d",
           borderWidth: 0,
         },
       ],
@@ -965,31 +1128,65 @@ function renderQualityRejectedIndicator() {
       maintainAspectRatio: false,
       plugins: {
         legend: {
-          display: true,
+          display: false,
           position: "bottom",
           labels: { boxWidth: 10, boxHeight: 10, font: { size: 11 } },
+        },
+        tooltip: {
+          callbacks: {
+            label(context) {
+              const item = deviceStats[context.dataIndex];
+              if (!item) return `Erro medio: ${formatNumber(context.parsed.y || context.parsed.x || 0)}%`;
+              return `Erro medio: ${item.avgErrorPercent.toFixed(2)}%`;
+            },
+            afterLabel(context) {
+              const item = deviceStats[context.dataIndex];
+              if (!item) return "";
+              return `Reprovado total: ${formatNumber(item.rejectedTotal)} | Produzido total: ${formatNumber(
+                item.doneTotal
+              )} | Dias: ${formatNumber(item.days)} | Reprovado medio/dia: ${item.avgRejectedPerDay.toFixed(2)}`;
+            },
+          },
         },
       },
       scales: {
         x: {
-          stacked: true,
+          stacked: false,
           ticks: {
             maxRotation: 35,
             minRotation: 0,
           },
         },
         y: {
-          stacked: true,
           beginAtZero: true,
           ticks: {
             callback(value) {
-              return formatNumber(value);
+              return `${value}%`;
             },
           },
         },
       },
     },
   });
+}
+
+function isUserActivelyEditing() {
+  if (Date.now() - lastUserInteractionAt < USER_INTERACTION_GRACE_MS) return true;
+  if (editingDeviceKey) return true;
+  if (qualityRejectEditorKey) return true;
+  if (elements.modal?.open) return true;
+
+  const active = document.activeElement;
+  if (!active) return false;
+  const tagName = String(active.tagName || "").toUpperCase();
+  if (tagName === "INPUT" || tagName === "TEXTAREA" || tagName === "SELECT") {
+    return true;
+  }
+  return false;
+}
+
+function markUserInteraction() {
+  lastUserInteractionAt = Date.now();
 }
 
 function renderQualityPanelState() {
@@ -1066,6 +1263,11 @@ async function forceServerSync() {
 }
 
 function bindEvents() {
+  document.addEventListener("pointerdown", markUserInteraction, true);
+  document.addEventListener("keydown", markUserInteraction, true);
+  document.addEventListener("input", markUserInteraction, true);
+  document.addEventListener("focusin", markUserInteraction, true);
+
   elements.search.addEventListener("input", applyFiltersAndSort);
   elements.sort.addEventListener("change", applyFiltersAndSort);
 
@@ -1310,6 +1512,18 @@ function bindEvents() {
     if (!key) return;
 
     if (action === "edit") {
+      if (!dailyProgress[key] && finalProductsHistory[key]) {
+        const fromFinal = finalProductsHistory[key];
+        dailyProgress[key] = {
+          target: parseNumber(fromFinal.target),
+          done: parseNumber(fromFinal.done),
+          rejected: parseNumber(fromFinal.rejected),
+          productionFinalizedAt: fromFinal.productionFinalizedAt || new Date().toISOString(),
+          testedAt: fromFinal.testedAt || new Date().toISOString(),
+          completedAt: fromFinal.completedAt || fromFinal.productionFinalizedAt || new Date().toISOString(),
+        };
+        saveDailyProgress();
+      }
       editingDeviceKey = key;
       renderSavedDevices();
       return;
@@ -1324,7 +1538,15 @@ function bindEvents() {
     if (action === "delete") {
       const shouldDelete = window.confirm("Tem certeza que deseja excluir este dispositivo?");
       if (!shouldDelete) return;
+      const previous = dailyProgress[key] || finalProductsHistory[key];
+      if (previous) {
+        registerExcludedProductRecord(key, previous, "manual_delete");
+      }
       delete dailyProgress[key];
+      if (finalProductsHistory[key]) {
+        delete finalProductsHistory[key];
+        saveFinalProductsHistory();
+      }
       saveDailyProgress();
       sendAuditEvent("production_deleted", { key });
       editingDeviceKey = "";
@@ -1374,9 +1596,10 @@ function bindEvents() {
       if (!card) return;
       const targetInput = card.querySelector(".saved-target-input");
       const doneInput = card.querySelector(".saved-done-input");
+      const rejectedInput = card.querySelector(".saved-rejected-input");
       const target = parseNumber(targetInput?.value);
       const done = parseNumber(doneInput?.value);
-      const rejected = parseNumber(dailyProgress[key]?.rejected);
+      const rejected = rejectedInput ? parseNumber(rejectedInput?.value) : parseNumber(dailyProgress[key]?.rejected);
       dailyProgress[key] = applyCompletionState({
         ...(dailyProgress[key] || {}),
         target,
@@ -1400,15 +1623,14 @@ function bindEvents() {
   };
 
   elements.savedDevices.addEventListener("click", handleSavedDeviceActions);
-  if (elements.doneDevices) {
-    elements.doneDevices.addEventListener("click", handleSavedDeviceActions);
-  }
 }
 
 async function init() {
   buildTableHeader();
   loadDailyProgress();
   loadProductionHistory();
+  loadFinalProductsHistory();
+  loadExcludedProductsHistory();
   bindEvents();
 
   try {
@@ -1420,12 +1642,17 @@ async function init() {
     }
     await loadDefaultCsv();
     setInterval(async () => {
+      if (autoRefreshInFlight) return;
+      if (isUserActivelyEditing()) return;
+      autoRefreshInFlight = true;
       try {
         await loadServerStatus();
         await loadProductionHistoryFromServer();
         await loadDefaultCsv();
       } catch (error) {
         // Mantem os dados atuais se uma atualizacao falhar.
+      } finally {
+        autoRefreshInFlight = false;
       }
     }, AUTO_REFRESH_MS);
   } catch (error) {
