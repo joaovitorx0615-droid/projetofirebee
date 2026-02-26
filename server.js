@@ -82,11 +82,17 @@ let syncPromise = null;
 const historyState = {
   byDate: {},
 };
+const sharedUiState = {
+  dailyProgress: {},
+  finalProductsHistory: {},
+  excludedProductsHistory: [],
+};
 let historyPool = null;
 const historyRuntime = {
   mode: "mariadb",
   lastError: null,
 };
+const sseClients = new Set();
 
 function toLocalDateKey(date) {
   const d = date instanceof Date ? date : new Date();
@@ -238,6 +244,15 @@ function sanitizeHistoryMap(input) {
   return input;
 }
 
+function sanitizeObjectMap(input) {
+  if (!input || typeof input !== "object" || Array.isArray(input)) return {};
+  return input;
+}
+
+function sanitizeArray(input) {
+  return Array.isArray(input) ? input : [];
+}
+
 async function saveHistoryJsonToDisk() {
   await fs.promises.mkdir(path.dirname(HISTORY_FILE), { recursive: true });
   await fs.promises.writeFile(HISTORY_FILE, JSON.stringify(historyState.byDate), "utf-8");
@@ -308,6 +323,14 @@ async function createHistoryPool() {
         KEY idx_audit_created_at (created_at),
         KEY idx_audit_event_type (event_type),
         KEY idx_audit_item_key (item_key)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+    `);
+    await conn.query(`
+      CREATE TABLE IF NOT EXISTS production_app_state (
+        state_key VARCHAR(80) NOT NULL,
+        state_json LONGTEXT NOT NULL,
+        updated_at DATETIME(3) NOT NULL,
+        PRIMARY KEY (state_key)
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
     `);
   } finally {
@@ -390,6 +413,44 @@ async function loadHistoryFromDb() {
   }
   historyState.byDate = mapped;
   console.log("Historico de producao carregado (MariaDB).");
+}
+
+async function loadAppStateKey(stateKey, fallbackValue) {
+  const pool = await createHistoryPool();
+  const rows = await pool.query(
+    "SELECT state_json FROM production_app_state WHERE state_key = ? LIMIT 1",
+    [stateKey]
+  );
+  if (!rows?.length) return fallbackValue;
+  try {
+    return JSON.parse(String(rows[0].state_json || "null"));
+  } catch (error) {
+    return fallbackValue;
+  }
+}
+
+async function saveAppStateKey(stateKey, value) {
+  const pool = await createHistoryPool();
+  await pool.query(
+    `INSERT INTO production_app_state (state_key, state_json, updated_at)
+     VALUES (?, ?, NOW(3))
+     ON DUPLICATE KEY UPDATE
+       state_json = VALUES(state_json),
+       updated_at = VALUES(updated_at)`,
+    [stateKey, JSON.stringify(value ?? null)]
+  );
+}
+
+async function loadSharedUiStateFromDb() {
+  sharedUiState.dailyProgress = sanitizeObjectMap(
+    await loadAppStateKey("daily_progress", sharedUiState.dailyProgress)
+  );
+  sharedUiState.finalProductsHistory = sanitizeObjectMap(
+    await loadAppStateKey("final_products_history", sharedUiState.finalProductsHistory)
+  );
+  sharedUiState.excludedProductsHistory = sanitizeArray(
+    await loadAppStateKey("excluded_products_history", sharedUiState.excludedProductsHistory)
+  );
 }
 
 async function saveHistoryEntry(dateKey, key, target, done, rejected) {
@@ -570,10 +631,23 @@ async function syncSheetCsv() {
 async function startSheetSync() {
   await loadCacheFromDisk();
   await ensureHistoryDbReady();
+  await loadSharedUiStateFromDb();
   await syncSheetCsv();
   setInterval(() => {
     syncSheetCsv();
   }, SHEET_SYNC_MS);
+}
+
+function broadcastSse(eventName, payload) {
+  const dataText = JSON.stringify(payload || {});
+  for (const res of sseClients) {
+    try {
+      res.write(`event: ${eventName}\n`);
+      res.write(`data: ${dataText}\n\n`);
+    } catch (error) {
+      sseClients.delete(res);
+    }
+  }
 }
 
 function handleApiRoutes(req, res) {
@@ -669,7 +743,83 @@ function handleApiRoutes(req, res) {
           },
           req
         );
+        broadcastSse("state_updated", { scope: "production_history", dateKey, key });
 
+        res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ ok: true }));
+      })
+      .catch((error) => {
+        res.writeHead(400, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ ok: false, message: String(error.message || error) }));
+      });
+    return true;
+  }
+
+  if (pathname === "/api/daily-progress" && req.method === "GET") {
+    res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+    res.end(JSON.stringify(sharedUiState.dailyProgress));
+    return true;
+  }
+
+  if (pathname === "/api/daily-progress" && req.method === "POST") {
+    parseJsonBody(req)
+      .then(async (body) => {
+        const next = sanitizeObjectMap(body);
+        sharedUiState.dailyProgress = next;
+        if (historyRuntime.mode === "mariadb") {
+          await saveAppStateKey("daily_progress", sharedUiState.dailyProgress);
+        }
+        broadcastSse("state_updated", { scope: "daily_progress" });
+        res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ ok: true }));
+      })
+      .catch((error) => {
+        res.writeHead(400, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ ok: false, message: String(error.message || error) }));
+      });
+    return true;
+  }
+
+  if (pathname === "/api/final-products-history" && req.method === "GET") {
+    res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+    res.end(JSON.stringify(sharedUiState.finalProductsHistory));
+    return true;
+  }
+
+  if (pathname === "/api/final-products-history" && req.method === "POST") {
+    parseJsonBody(req)
+      .then(async (body) => {
+        const next = sanitizeObjectMap(body);
+        sharedUiState.finalProductsHistory = next;
+        if (historyRuntime.mode === "mariadb") {
+          await saveAppStateKey("final_products_history", sharedUiState.finalProductsHistory);
+        }
+        broadcastSse("state_updated", { scope: "final_products_history" });
+        res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ ok: true }));
+      })
+      .catch((error) => {
+        res.writeHead(400, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ ok: false, message: String(error.message || error) }));
+      });
+    return true;
+  }
+
+  if (pathname === "/api/excluded-products-history" && req.method === "GET") {
+    res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+    res.end(JSON.stringify(sharedUiState.excludedProductsHistory));
+    return true;
+  }
+
+  if (pathname === "/api/excluded-products-history" && req.method === "POST") {
+    parseJsonBody(req)
+      .then(async (body) => {
+        const next = sanitizeArray(body);
+        sharedUiState.excludedProductsHistory = next;
+        if (historyRuntime.mode === "mariadb") {
+          await saveAppStateKey("excluded_products_history", sharedUiState.excludedProductsHistory);
+        }
+        broadcastSse("state_updated", { scope: "excluded_products_history" });
         res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
         res.end(JSON.stringify({ ok: true }));
       })
@@ -684,6 +834,7 @@ function handleApiRoutes(req, res) {
     syncSheetCsv()
       .then(async () => {
         await saveAuditEvent("sheet_sync_manual", { sourceMode: sheetState.sourceMode }, req);
+        broadcastSse("state_updated", { scope: "sheet_sync", updatedAt: sheetState.updatedAt });
         res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
         res.end(
           JSON.stringify({
@@ -703,6 +854,21 @@ function handleApiRoutes(req, res) {
           })
         );
       });
+    return true;
+  }
+
+  if (pathname === "/api/events" && req.method === "GET") {
+    res.writeHead(200, {
+      "Content-Type": "text/event-stream; charset=utf-8",
+      "Cache-Control": "no-store",
+      Connection: "keep-alive",
+      "X-Accel-Buffering": "no",
+    });
+    res.write(": connected\n\n");
+    sseClients.add(res);
+    req.on("close", () => {
+      sseClients.delete(res);
+    });
     return true;
   }
 

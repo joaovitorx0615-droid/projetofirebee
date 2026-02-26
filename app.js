@@ -4,14 +4,17 @@ const STATUS_ENDPOINT = "/api/producao-status";
 const HISTORY_ENDPOINT = "/api/production-history";
 const HISTORY_ENTRY_ENDPOINT = "/api/production-history-entry";
 const AUDIT_ENDPOINT = "/api/audit-event";
+const DAILY_PROGRESS_ENDPOINT = "/api/daily-progress";
+const FINAL_PRODUCTS_HISTORY_ENDPOINT = "/api/final-products-history";
+const EXCLUDED_PRODUCTS_HISTORY_ENDPOINT = "/api/excluded-products-history";
+const EVENTS_ENDPOINT = "/api/events";
 const MONTHS = ["Jan", "Fev", "Mar", "Abr", "Mai", "Jun", "Jul", "Ago", "Set", "Out", "Nov", "Dez"];
 const DISPLAY_YEAR = 2026;
-const AUTO_REFRESH_MS = 30000;
+const AUTO_REFRESH_MS = 5000;
 const DAILY_STORAGE_KEY = "daily-production-progress";
 const PRODUCTION_HISTORY_KEY = "production-history";
 const FINAL_PRODUCTS_STORAGE_KEY = "final-products-history";
 const EXCLUDED_PRODUCTS_STORAGE_KEY = "excluded-products-history";
-const USER_INTERACTION_GRACE_MS = 45000;
 const QUALITY_REJECTION_CATEGORIES = [
   { value: "montagem", label: "Montagem" },
   { value: "fabrica", label: "Defeito da fabrica" },
@@ -100,6 +103,11 @@ let finalProductsHistory = {};
 let excludedProductsHistory = [];
 let autoRefreshInFlight = false;
 let lastUserInteractionAt = Date.now();
+let dailyProgressSyncTimer = null;
+let finalProductsSyncTimer = null;
+let excludedProductsSyncTimer = null;
+let realtimeEventSource = null;
+let realtimeRefreshTimer = null;
 
 function parseNumber(value) {
   const num = Number(String(value ?? "").replace(",", ".").trim());
@@ -278,6 +286,7 @@ function saveDailyProgress() {
   } catch (error) {
     // Ignora falha de persistencia.
   }
+  scheduleDailyProgressSync();
 }
 
 function saveProductionHistory() {
@@ -304,6 +313,7 @@ function saveFinalProductsHistory() {
   } catch (error) {
     // Ignora falha de persistencia.
   }
+  scheduleFinalProductsSync();
 }
 
 function loadExcludedProductsHistory() {
@@ -322,6 +332,106 @@ function saveExcludedProductsHistory() {
   } catch (error) {
     // Ignora falha de persistencia.
   }
+  scheduleExcludedProductsSync();
+}
+
+async function loadDailyProgressFromServer() {
+  const response = await fetch(encodeURI(DAILY_PROGRESS_ENDPOINT), { cache: "no-store" });
+  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  const data = await response.json();
+  if (!data || typeof data !== "object" || Array.isArray(data)) {
+    throw new Error("Daily progress invalido.");
+  }
+  dailyProgress = data;
+  try {
+    localStorage.setItem(DAILY_STORAGE_KEY, JSON.stringify(dailyProgress));
+  } catch (error) {
+    // Ignora falha de persistencia local.
+  }
+}
+
+async function loadFinalProductsHistoryFromServer() {
+  const response = await fetch(encodeURI(FINAL_PRODUCTS_HISTORY_ENDPOINT), { cache: "no-store" });
+  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  const data = await response.json();
+  if (!data || typeof data !== "object" || Array.isArray(data)) {
+    throw new Error("Historico final invalido.");
+  }
+  finalProductsHistory = data;
+  try {
+    localStorage.setItem(FINAL_PRODUCTS_STORAGE_KEY, JSON.stringify(finalProductsHistory));
+  } catch (error) {
+    // Ignora falha de persistencia local.
+  }
+}
+
+async function loadExcludedProductsHistoryFromServer() {
+  const response = await fetch(encodeURI(EXCLUDED_PRODUCTS_HISTORY_ENDPOINT), { cache: "no-store" });
+  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  const data = await response.json();
+  if (!Array.isArray(data)) {
+    throw new Error("Historico de exclusao invalido.");
+  }
+  excludedProductsHistory = data;
+  try {
+    localStorage.setItem(EXCLUDED_PRODUCTS_STORAGE_KEY, JSON.stringify(excludedProductsHistory));
+  } catch (error) {
+    // Ignora falha de persistencia local.
+  }
+}
+
+function scheduleDailyProgressSync() {
+  if (dailyProgressSyncTimer) {
+    clearTimeout(dailyProgressSyncTimer);
+  }
+  dailyProgressSyncTimer = setTimeout(async () => {
+    dailyProgressSyncTimer = null;
+    try {
+      await fetch(encodeURI(DAILY_PROGRESS_ENDPOINT), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(dailyProgress || {}),
+      });
+    } catch (error) {
+      // Mantem local se sincronizacao falhar.
+    }
+  }, 250);
+}
+
+function scheduleFinalProductsSync() {
+  if (finalProductsSyncTimer) {
+    clearTimeout(finalProductsSyncTimer);
+  }
+  finalProductsSyncTimer = setTimeout(async () => {
+    finalProductsSyncTimer = null;
+    try {
+      await fetch(encodeURI(FINAL_PRODUCTS_HISTORY_ENDPOINT), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(finalProductsHistory || {}),
+      });
+    } catch (error) {
+      // Mantem local se sincronizacao falhar.
+    }
+  }, 250);
+}
+
+function scheduleExcludedProductsSync() {
+  if (excludedProductsSyncTimer) {
+    clearTimeout(excludedProductsSyncTimer);
+  }
+  excludedProductsSyncTimer = setTimeout(async () => {
+    excludedProductsSyncTimer = null;
+    try {
+      await fetch(encodeURI(EXCLUDED_PRODUCTS_HISTORY_ENDPOINT), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(excludedProductsHistory || []),
+      });
+    } catch (error) {
+      // Mantem local se sincronizacao falhar.
+    }
+  }, 250);
 }
 
 function buildExcludedEntryKey(dateKey, deviceKey) {
@@ -965,9 +1075,6 @@ function renderSavedDevices() {
       <p>Reprovado: <strong>${formatNumber(item.rejected)}</strong></p>
       <p>Falta: <strong>${formatNumber(item.remaining)}</strong></p>
       <span class="saved-tag">Finalizado</span>
-      <div class="saved-actions">
-        <button type="button" class="saved-action-btn saved-edit-btn" data-action="edit" data-key="${item.key}">Editar</button>
-      </div>
     </article>`;
           }
         )
@@ -1171,7 +1278,6 @@ function renderQualityRejectedIndicator() {
 }
 
 function isUserActivelyEditing() {
-  if (Date.now() - lastUserInteractionAt < USER_INTERACTION_GRACE_MS) return true;
   if (editingDeviceKey) return true;
   if (qualityRejectEditorKey) return true;
   if (elements.modal?.open) return true;
@@ -1187,6 +1293,59 @@ function isUserActivelyEditing() {
 
 function markUserInteraction() {
   lastUserInteractionAt = Date.now();
+}
+
+async function refreshSharedStateFromServer({ includeCsv = true } = {}) {
+  await loadServerStatus();
+  await loadDailyProgressFromServer();
+  await loadProductionHistoryFromServer();
+  await loadFinalProductsHistoryFromServer();
+  await loadExcludedProductsHistoryFromServer();
+
+  if (!isUserActivelyEditing()) {
+    if (includeCsv) {
+      await loadDefaultCsv();
+    }
+    renderSavedDevices();
+    renderQualityPanel();
+  }
+}
+
+function scheduleRealtimeRefresh() {
+  if (realtimeRefreshTimer) {
+    clearTimeout(realtimeRefreshTimer);
+  }
+  realtimeRefreshTimer = setTimeout(async () => {
+    realtimeRefreshTimer = null;
+    if (autoRefreshInFlight) return;
+    autoRefreshInFlight = true;
+    try {
+      await refreshSharedStateFromServer({ includeCsv: false });
+    } catch (error) {
+      // Mantem estado atual se houver falha de rede.
+    } finally {
+      autoRefreshInFlight = false;
+    }
+  }, 250);
+}
+
+function setupRealtimeUpdates() {
+  if (typeof EventSource === "undefined") return;
+  if (realtimeEventSource) return;
+  try {
+    realtimeEventSource = new EventSource(encodeURI(EVENTS_ENDPOINT));
+    realtimeEventSource.onmessage = () => {
+      scheduleRealtimeRefresh();
+    };
+    realtimeEventSource.addEventListener("state_updated", () => {
+      scheduleRealtimeRefresh();
+    });
+    realtimeEventSource.onerror = () => {
+      // O EventSource reconecta automaticamente.
+    };
+  } catch (error) {
+    // Sem suporte/erro local: segue com polling normal.
+  }
 }
 
 function renderQualityPanelState() {
@@ -1632,23 +1791,23 @@ async function init() {
   loadFinalProductsHistory();
   loadExcludedProductsHistory();
   bindEvents();
+  setupRealtimeUpdates();
 
   try {
     await loadServerStatus();
     try {
-      await loadProductionHistoryFromServer();
+      await refreshSharedStateFromServer({ includeCsv: false });
     } catch (error) {
       // Mantem fallback local.
     }
     await loadDefaultCsv();
+    renderSavedDevices();
+    renderQualityPanel();
     setInterval(async () => {
       if (autoRefreshInFlight) return;
-      if (isUserActivelyEditing()) return;
       autoRefreshInFlight = true;
       try {
-        await loadServerStatus();
-        await loadProductionHistoryFromServer();
-        await loadDefaultCsv();
+        await refreshSharedStateFromServer({ includeCsv: !isUserActivelyEditing() });
       } catch (error) {
         // Mantem os dados atuais se uma atualizacao falhar.
       } finally {
