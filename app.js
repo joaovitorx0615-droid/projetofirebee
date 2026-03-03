@@ -10,7 +10,7 @@ const EXCLUDED_PRODUCTS_HISTORY_ENDPOINT = "/api/excluded-products-history";
 const EVENTS_ENDPOINT = "/api/events";
 const MONTHS = ["Jan", "Fev", "Mar", "Abr", "Mai", "Jun", "Jul", "Ago", "Set", "Out", "Nov", "Dez"];
 const DISPLAY_YEAR = 2026;
-const AUTO_REFRESH_MS = 5000;
+const AUTO_REFRESH_MS = 20000;
 const DAILY_STORAGE_KEY = "daily-production-progress";
 const PRODUCTION_HISTORY_KEY = "production-history";
 const FINAL_PRODUCTS_STORAGE_KEY = "final-products-history";
@@ -108,6 +108,7 @@ let finalProductsSyncTimer = null;
 let excludedProductsSyncTimer = null;
 let realtimeEventSource = null;
 let realtimeRefreshTimer = null;
+let realtimeConnected = false;
 
 function parseNumber(value) {
   const num = Number(String(value ?? "").replace(",", ".").trim());
@@ -1334,6 +1335,9 @@ function setupRealtimeUpdates() {
   if (realtimeEventSource) return;
   try {
     realtimeEventSource = new EventSource(encodeURI(EVENTS_ENDPOINT));
+    realtimeEventSource.onopen = () => {
+      realtimeConnected = true;
+    };
     realtimeEventSource.onmessage = () => {
       scheduleRealtimeRefresh();
     };
@@ -1341,9 +1345,11 @@ function setupRealtimeUpdates() {
       scheduleRealtimeRefresh();
     });
     realtimeEventSource.onerror = () => {
+      realtimeConnected = false;
       // O EventSource reconecta automaticamente.
     };
   } catch (error) {
+    realtimeConnected = false;
     // Sem suporte/erro local: segue com polling normal.
   }
 }
@@ -1807,7 +1813,12 @@ async function init() {
       if (autoRefreshInFlight) return;
       autoRefreshInFlight = true;
       try {
-        await refreshSharedStateFromServer({ includeCsv: !isUserActivelyEditing() });
+        const activelyEditing = isUserActivelyEditing();
+        if (realtimeConnected) {
+          await loadServerStatus();
+        } else {
+          await refreshSharedStateFromServer({ includeCsv: !activelyEditing });
+        }
       } catch (error) {
         // Mantem os dados atuais se uma atualizacao falhar.
       } finally {
