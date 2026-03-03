@@ -1,0 +1,94 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{lmodern}
+\title{Database Normalization Strategy}
+\author{Project: firebee}
+\date{\today}
+
+\begin{document}
+\maketitle
+
+\section*{Scope}
+This document proposes a normalization strategy for the \texttt{dashboard\_producao} MariaDB schema without applying changes yet.
+
+\section*{Current Structure Summary}
+\begin{itemize}
+  \item \texttt{production\_history(date\_key, item\_key, target, done, rejected, updated\_at)}
+  \item \texttt{production\_audit\_log(id, event\_type, item\_key, source\_ip, user\_agent, payload\_json, created\_at)}
+  \item \texttt{production\_app\_state(state\_key, state\_json, updated\_at)}
+\end{itemize}
+
+\section*{Key Normalization Gaps}
+\begin{enumerate}
+  \item \texttt{production\_app\_state.state\_json} stores large nested object graphs instead of atomic relational rows.
+  \item \texttt{production\_history.date\_key} is \texttt{varchar(10)} instead of native \texttt{DATE}.
+  \item \texttt{item\_key} is repeated text across tables with no shared dimension table and no foreign keys.
+  \item \texttt{production\_audit\_log.payload\_json} duplicates values that also exist in relational columns.
+  \item Quantity fields (\texttt{target}, \texttt{done}, \texttt{rejected}) use \texttt{double}; these should be integer/decimal based on business rules.
+\end{enumerate}
+
+\section*{Target Normalized Model}
+\subsection*{1) items}
+\begin{itemize}
+  \item \texttt{item\_id} (PK)
+  \item \texttt{item\_key} (UNIQUE)
+  \item Optional fields: \texttt{sigla}, \texttt{codigo}
+\end{itemize}
+
+\subsection*{2) production\_daily}
+\begin{itemize}
+  \item \texttt{production\_daily\_id} (PK)
+  \item \texttt{production\_date} (DATE)
+  \item \texttt{item\_id} (FK)
+  \item \texttt{target\_qty}, \texttt{done\_qty}, \texttt{rejected\_qty}, \texttt{updated\_at}
+  \item UNIQUE(\texttt{production\_date}, \texttt{item\_id})
+\end{itemize}
+
+\subsection*{3) production\_rejections}
+\begin{itemize}
+  \item \texttt{rejection\_id} (PK)
+  \item \texttt{production\_daily\_id} (FK)
+  \item \texttt{category}, \texttt{reason}, \texttt{observation}, \texttt{rejected\_count}
+\end{itemize}
+
+\subsection*{4) production\_events (optional projection)}
+Keep \texttt{production\_audit\_log} as immutable audit source. Optionally add a typed projection table for frequent queries.
+
+\subsection*{5) production\_app\_state}
+Keep only as cache/snapshot, not source of truth.
+
+\section*{Migration Strategy (No Downtime)}
+\begin{enumerate}
+  \item Add new tables and constraints.
+  \item Backfill from existing data sources.
+  \item Run a dual-write transition phase.
+  \item Switch reads to normalized tables.
+  \item Deprecate/freeze legacy paths.
+\end{enumerate}
+
+\section*{Data Quality and Constraints}
+\begin{itemize}
+  \item Use \texttt{DATE} for production date.
+  \item Use \texttt{INT/BIGINT} for count fields, or \texttt{DECIMAL} if needed.
+  \item Enforce non-negative and FK constraints.
+  \item Add uniqueness to prevent duplicate daily rows.
+\end{itemize}
+
+\section*{Risks}
+\begin{itemize}
+  \item Existing code may depend on JSON snapshots.
+  \item Event payload schemas may vary by event type.
+  \item Legacy keys may need standardization before strict FK enforcement.
+\end{itemize}
+
+\section*{Success Criteria}
+\begin{itemize}
+  \item No data loss during migration.
+  \item Daily production and rejection reports served from normalized tables.
+  \item Referential integrity enforced.
+  \item Audit logging preserved with queryable projections.
+\end{itemize}
+
+\end{document}

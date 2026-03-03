@@ -110,15 +110,16 @@ body {
 
 .quality-panel {
   position: fixed;
-  top: 60px;
+  top: 56px;
   left: 12px;
-  width: min(360px, calc(100vw - 24px));
-  max-height: min(72vh, 620px);
+  width: min(860px, calc(100vw - 24px));
+  max-height: min(88vh, 820px);
   overflow: auto;
   z-index: 55;
   border: 2px solid #d6d6d6;
   background: #f2f2f2;
-  padding: 10px;
+  padding: 12px;
+  box-shadow: 0 10px 32px rgba(0, 0, 0, 0.22);
 }
 
 .quality-panel.hidden {
@@ -162,6 +163,25 @@ body {
   gap: 10px;
 }
 
+.quality-metrics-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.quality-metric-card {
+  border: 1px solid #d5d5d5;
+  background: #fff;
+  padding: 8px;
+}
+
+.quality-metric-card h5 {
+  margin: 0 0 6px;
+  font: 700 0.75rem/1.15 "DM Sans", sans-serif;
+  color: #232323;
+  text-transform: uppercase;
+}
+
 .quality-indicator-wrap {
   height: 140px;
   background: #fff;
@@ -170,6 +190,13 @@ body {
 }
 
 #quality-rejected-chart {
+  width: 100%;
+  height: 100%;
+}
+
+#quality-approved-boards-chart,
+#quality-approved-products-chart,
+#quality-rejected-boards-chart {
   width: 100%;
   height: 100%;
 }
@@ -370,6 +397,11 @@ h1 {
   padding: 10px;
 }
 
+.devices-panel {
+  align-self: start;
+  height: fit-content;
+}
+
 .status-panel {
   min-height: 100%;
 }
@@ -462,7 +494,8 @@ h1 {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(110px, 1fr));
   gap: 8px;
-  max-height: 110px;
+  max-height: 420px;
+  min-height: 260px;
   overflow: auto;
   padding-right: 4px;
 }
@@ -488,6 +521,12 @@ h1 {
   max-height: none;
   overflow: visible;
   padding-right: 0;
+}
+
+#done-devices {
+  max-height: 420px;
+  overflow: auto;
+  padding-right: 6px;
 }
 
 .saved-card {
@@ -852,6 +891,14 @@ tbody tr:hover {
 }
 
 @media (max-width: 980px) {
+  .quality-panel {
+    width: min(96vw, 720px);
+  }
+
+  .quality-metrics-grid {
+    grid-template-columns: 1fr;
+  }
+
   .chart-columns {
     grid-template-columns: 1fr;
     gap: 10px;
@@ -867,6 +914,14 @@ tbody tr:hover {
 }
 
 @media (max-width: 600px) {
+  .quality-panel {
+    top: 56px;
+    left: 8px;
+    width: calc(100vw - 16px);
+    max-height: calc(100vh - 70px);
+    padding: 10px;
+  }
+
   body {
     overflow: auto;
   }
