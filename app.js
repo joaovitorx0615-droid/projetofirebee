@@ -20,6 +20,7 @@ const QUALITY_REJECTION_CATEGORIES = [
   { value: "fabrica", label: "Defeito da fabrica" },
 ];
 const QUALITY_DIVERSE_REASON = "DIVERSO";
+const MAX_CHART_PRODUCTION_PER_ENTRY = 3000;
 const QUALITY_REJECTION_REASONS = [
   "LED VERMELHO",
   "LED AZUL",
@@ -205,6 +206,12 @@ function getProgressRejectedTotal(progress) {
   return getRejectedTotalFromEntries(normalizeRejectionEntries(progress));
 }
 
+function toSafeChartValue(value, max = MAX_CHART_PRODUCTION_PER_ENTRY) {
+  const n = parseNumber(value);
+  if (!Number.isFinite(n) || n < 0) return 0;
+  return Math.min(n, max);
+}
+
 function buildDeviceQualityHistoryStats() {
   const aggregate = {};
   Object.entries(productionHistory || {}).forEach(([dateKey, dayData]) => {
@@ -218,9 +225,9 @@ function buildDeviceQualityHistoryStats() {
           days: 0,
         };
       }
-      const done = Math.max(parseNumber(values?.done), 0);
-      const rejected = Math.max(parseNumber(values?.rejected), 0);
-      aggregate[deviceKey].done += done;
+      const rejected = toSafeChartValue(values?.rejected);
+      const safeDone = toSafeChartValue(values?.done);
+      aggregate[deviceKey].done += safeDone;
       aggregate[deviceKey].rejected += rejected;
       aggregate[deviceKey].days += 1;
     });
@@ -751,7 +758,7 @@ function renderProducedCharts(rows, monthlyTotals, totalAnual, peakValue) {
       const dayData = productionHistory[key] || {};
       const totalDay = Object.entries(dayData).reduce((acc, [deviceKey, item]) => {
         if (isHistoryEntryExcluded(key, deviceKey)) return acc;
-        return acc + parseNumber(item?.done);
+        return acc + toSafeChartValue(item?.done);
       }, 0);
       labels.push(`${String(d.getDate()).padStart(2, "0")}/${String(d.getMonth() + 1).padStart(2, "0")}`);
       values.push(totalDay);
@@ -801,7 +808,7 @@ function renderProducedCharts(rows, monthlyTotals, totalAnual, peakValue) {
       if (month < 0 || month > 11) return;
       const totalDay = Object.entries(dayData || {}).reduce((acc, [deviceKey, item]) => {
         if (isHistoryEntryExcluded(dateKey, deviceKey)) return acc;
-        return acc + parseNumber(item?.done);
+        return acc + toSafeChartValue(item?.done);
       }, 0);
       monthlyProduced[month] += totalDay;
     });
@@ -844,7 +851,7 @@ function renderProducedCharts(rows, monthlyTotals, totalAnual, peakValue) {
       const year = dateKey.slice(0, 4);
       const totalDay = Object.entries(dayData || {}).reduce((acc, [deviceKey, item]) => {
         if (isHistoryEntryExcluded(dateKey, deviceKey)) return acc;
-        return acc + parseNumber(item?.done);
+        return acc + toSafeChartValue(item?.done);
       }, 0);
       annualTotals[year] = (annualTotals[year] || 0) + totalDay;
     });
