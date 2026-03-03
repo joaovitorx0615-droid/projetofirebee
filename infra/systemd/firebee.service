@@ -1,0 +1,19 @@
+[Unit]
+Description=Firebee Dashboard Producao (Node.js)
+After=network.target mariadb.service
+Wants=network.target
+
+[Service]
+Type=simple
+User=producao
+Group=producao
+WorkingDirectory=/opt/firebee
+EnvironmentFile=/opt/firebee/.env
+ExecStart=/usr/bin/node /opt/firebee/server.js
+Restart=always
+RestartSec=3
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
