@@ -15,7 +15,10 @@
 <body>
   <div id="system-alert" class="system-alert hidden" role="status" aria-live="polite"></div>
   <div id="system-note" class="system-note hidden" role="status" aria-live="polite"></div>
-  <button id="quality-toggle-btn" class="quality-toggle-btn" type="button">Qualidade</button>
+  <button id="quality-toggle-btn" class="quality-toggle-btn" type="button">
+    <span>Qualidade</span>
+    <span id="quality-toggle-badge" class="quality-toggle-badge hidden">0</span>
+  </button>
   <aside id="quality-panel" class="quality-panel hidden">
     <div class="quality-head">
       <h3>Qualidade</h3>
@@ -53,10 +56,17 @@
         <article class="chart-panel devices-panel">
           <div class="chart-head">
             <h2>Aguardando inicio</h2>
-            <p>Painel limpo para acompanhar e registrar conforme os pedidos.</p>
+            <p>Selecione o dispositivo e a quantidade. Ele so vai para andamento quando voce iniciar.</p>
           </div>
-          <div id="device-picker-tools" class="device-picker-tools collapsed">
-            <input id="device-picker-search" type="search" placeholder="Pesquisar dispositivo por sigla ou codigo..." />
+          <div id="device-picker-tools" class="device-picker-tools">
+            <div class="device-picker-form">
+              <select id="device-picker-select" class="device-picker-select">
+                <option value="">Selecione um dispositivo...</option>
+              </select>
+              <input id="device-picker-target" class="device-picker-target" type="number" min="1" step="1" placeholder="Quantidade" />
+              <input id="device-picker-deadline" class="device-picker-deadline" type="date" />
+              <button id="device-picker-add-btn" type="button" class="btn-secondary">Adicionar</button>
+            </div>
           </div>
           <div id="sigla-buttons" class="sigla-buttons"></div>
         </article>
@@ -109,7 +119,7 @@
         <canvas id="annual-produced-chart"></canvas>
       </article>
       <article class="trend-box quality-history-box">
-        <h3>Erro medio por dispositivo (%)</h3>
+        <h3 id="quality-monthly-chart-title">Produzidos no mes</h3>
         <div class="quality-indicator-wrap">
           <canvas id="quality-rejected-chart"></canvas>
         </div>
@@ -150,4 +160,3 @@
   <script src="./app.js?v=20260225-2"></script>
 </body>
 </html>
-

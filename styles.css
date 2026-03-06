@@ -84,6 +84,9 @@ body {
   top: 12px;
   left: 12px;
   z-index: 60;
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
   border: 1px solid #2f2f2f;
   border-radius: 999px;
   background: linear-gradient(135deg, #111111 0%, #2a2a2a 100%);
@@ -107,6 +110,28 @@ body {
 .quality-toggle-btn.active {
   border-color: #0f8f6f;
   background: linear-gradient(135deg, #0f8f6f 0%, #13a07d 100%);
+}
+
+.quality-toggle-btn.has-pending {
+  border-color: #ff5f57;
+  background: linear-gradient(135deg, #5a0f0f 0%, #b61f1f 55%, #ff5f57 100%);
+  box-shadow: 0 10px 26px rgba(190, 28, 28, 0.38);
+}
+
+.quality-toggle-badge {
+  min-width: 24px;
+  height: 24px;
+  padding: 0 7px;
+  border-radius: 999px;
+  background: #fff3f2;
+  color: #a61212;
+  font: 900 0.78rem/24px "DM Sans", sans-serif;
+  text-align: center;
+  box-shadow: inset 0 0 0 2px rgba(166, 18, 18, 0.15);
+}
+
+.quality-toggle-badge.hidden {
+  display: none;
 }
 
 .quality-panel {
@@ -209,21 +234,21 @@ body {
 }
 
 .quality-toggle-btn.attention-blink {
-  animation: qualityAlertPulse 0.95s ease-in-out infinite;
+  animation: qualityAlertPulse 0.82s ease-in-out infinite;
 }
 
 @keyframes qualityAlertPulse {
   0% {
     transform: scale(1);
-    box-shadow: 0 8px 20px rgba(0, 0, 0, 0.22), 0 0 0 0 rgba(255, 175, 32, 0.45);
+    box-shadow: 0 10px 26px rgba(190, 28, 28, 0.4), 0 0 0 0 rgba(255, 95, 87, 0.7);
   }
   50% {
-    transform: scale(1.035);
-    box-shadow: 0 10px 26px rgba(0, 0, 0, 0.28), 0 0 0 8px rgba(255, 175, 32, 0);
+    transform: scale(1.06);
+    box-shadow: 0 12px 30px rgba(190, 28, 28, 0.5), 0 0 0 11px rgba(255, 95, 87, 0);
   }
   100% {
     transform: scale(1);
-    box-shadow: 0 8px 20px rgba(0, 0, 0, 0.22), 0 0 0 0 rgba(255, 175, 32, 0);
+    box-shadow: 0 10px 26px rgba(190, 28, 28, 0.4), 0 0 0 0 rgba(255, 95, 87, 0);
   }
 }
 
@@ -369,6 +394,12 @@ h1 {
   background: #e7e7e7;
   border: 1px solid #d4d4d4;
   padding: 10px;
+  transition: box-shadow 0.18s ease, outline-color 0.18s ease, background 0.18s ease;
+}
+
+.chart-panel.drag-target {
+  background: #edf8f2;
+  box-shadow: inset 0 0 0 2px #0f8f6f;
 }
 
 .devices-panel {
@@ -434,7 +465,16 @@ h1 {
   display: none;
 }
 
-#device-picker-search {
+.device-picker-form {
+  display: grid;
+  grid-template-columns: minmax(0, 1.4fr) minmax(110px, 0.6fr) minmax(150px, 0.8fr) auto;
+  gap: 8px;
+  align-items: stretch;
+}
+
+.device-picker-select,
+.device-picker-target,
+.device-picker-deadline {
   width: 100%;
   border: 0;
   background: #f5f5f5;
@@ -466,8 +506,8 @@ h1 {
 .sigla-buttons {
   margin-top: 8px;
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(110px, 1fr));
-  gap: 8px;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 10px;
   flex: 1;
   min-height: 220px;
   max-height: 320px;
@@ -500,9 +540,11 @@ h1 {
 }
 
 .saved-card {
+  position: relative;
   background: #f0f0f0;
   border-left: 6px solid #ffb020;
   padding: 10px;
+  transition: transform 0.18s ease, box-shadow 0.18s ease, background 0.18s ease;
 }
 
 .saved-card h4 {
@@ -568,6 +610,17 @@ h1 {
   color: #fff;
 }
 
+.saved-icon-btn {
+  flex: 0 0 38px;
+  padding: 0;
+}
+
+.saved-icon-btn svg {
+  width: 16px;
+  height: 16px;
+  fill: currentColor;
+}
+
 .saved-cancel-btn {
   background: #b9b9b9;
   color: #1e1e1e;
@@ -583,11 +636,6 @@ h1 {
   color: #fff;
 }
 
-.saved-delete-btn {
-  background: #a82424;
-  color: #fff;
-}
-
 .saved-reject-btn {
   background: #c37810;
   color: #fff;
@@ -598,8 +646,36 @@ h1 {
   border-left-color: #1a9f7d;
 }
 
+.saved-card.pending-start {
+  background: #e9f3ff;
+  border-left-color: #1f7cc8;
+}
+
+.saved-card.pending-start .saved-tag {
+  color: #14528a;
+}
+
+.saved-card.dragging {
+  opacity: 0.6;
+  box-shadow: 0 10px 24px rgba(0, 0, 0, 0.16);
+}
+
 .saved-card.done .saved-tag {
   color: #176d57;
+}
+
+.saved-card-close {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  width: 24px;
+  height: 24px;
+  border: 0;
+  border-radius: 999px;
+  background: #a82424;
+  color: #fff;
+  font: 800 0.72rem/1 "DM Sans", sans-serif;
+  cursor: pointer;
 }
 
 .trends-card {

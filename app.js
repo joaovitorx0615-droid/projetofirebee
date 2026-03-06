@@ -60,14 +60,20 @@ const elements = {
   monthlyProducedChart: document.querySelector("#monthly-produced-chart"),
   annualProducedChart: document.querySelector("#annual-produced-chart"),
   qualityToggleBtn: document.querySelector("#quality-toggle-btn"),
+  qualityToggleBadge: document.querySelector("#quality-toggle-badge"),
   qualityPanel: document.querySelector("#quality-panel"),
   qualityCloseBtn: document.querySelector("#quality-close-btn"),
   qualityAwaitingList: document.querySelector("#quality-awaiting-list"),
   qualityDoneList: document.querySelector("#quality-done-list"),
   qualityRejectedChart: document.querySelector("#quality-rejected-chart"),
+  qualityMonthlyChartTitle: document.querySelector("#quality-monthly-chart-title"),
   siglaButtons: document.querySelector("#sigla-buttons"),
+  awaitingPanel: document.querySelector("#sigla-buttons")?.closest(".chart-panel"),
   devicePickerTools: document.querySelector("#device-picker-tools"),
-  devicePickerSearch: document.querySelector("#device-picker-search"),
+  devicePickerSelect: document.querySelector("#device-picker-select"),
+  devicePickerTarget: document.querySelector("#device-picker-target"),
+  devicePickerDeadline: document.querySelector("#device-picker-deadline"),
+  devicePickerAddBtn: document.querySelector("#device-picker-add-btn"),
   modal: document.querySelector("#chart-modal"),
   modalClose: document.querySelector("#modal-close"),
   modalTitle: document.querySelector("#modal-title"),
@@ -78,7 +84,9 @@ const elements = {
   calcOutput: document.querySelector("#calc-output"),
   saveProductionBtn: document.querySelector("#save-production-btn"),
   savedDevices: document.querySelector("#saved-devices"),
+  progressPanel: document.querySelector("#saved-devices")?.closest(".chart-panel"),
   doneDevices: document.querySelector("#done-devices"),
+  donePanel: document.querySelector("#done-devices")?.closest(".chart-panel"),
   systemAlert: document.querySelector("#system-alert"),
   systemNote: document.querySelector("#system-note"),
 };
@@ -89,8 +97,6 @@ let weeklyProducedChartInstance = null;
 let monthlyProducedChartInstance = null;
 let annualProducedChartInstance = null;
 let qualityRejectedChartInstance = null;
-let devicePickerOpen = true;
-let devicePickerSearchTerm = "";
 let selectedRowKey = "";
 let selectedRow = null;
 let dailyProgress = {};
@@ -110,6 +116,7 @@ let realtimeEventSource = null;
 let realtimeRefreshTimer = null;
 let realtimeConnected = false;
 let qualityRejectedSignature = "";
+let draggedDeviceKey = "";
 
 function parseNumber(value) {
   const num = Number(String(value ?? "").replace(",", ".").trim());
@@ -127,6 +134,21 @@ function escapeHtml(value) {
     .replaceAll(">", "&gt;")
     .replaceAll('"', "&quot;")
     .replaceAll("'", "&#39;");
+}
+
+function buildEditIconButton(action, key) {
+  return `<button type="button" class="saved-action-btn saved-edit-btn saved-icon-btn" data-action="${action}" data-key="${key}" aria-label="Editar">
+    <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+      <path d="M3 17.25V21h3.75L17.81 9.94l-3.75-3.75z"></path>
+      <path d="M20.71 7.04a1.003 1.003 0 0 0 0-1.42L18.37 3.29a1.003 1.003 0 0 0-1.42 0l-1.83 1.83 3.75 3.75z"></path>
+    </svg>
+  </button>`;
+}
+
+function buildDeleteIconButton(action, key) {
+  return `<button type="button" class="saved-card-close" data-action="${action}" data-key="${key}" aria-label="Excluir">
+    X
+  </button>`;
 }
 
 function normalizeRejectionReason(progress) {
@@ -267,6 +289,36 @@ function buildRejectionEntriesHtml(entries) {
 
 function buildRowKey(row) {
   return `${row.sigla}__${row.codigo}`;
+}
+
+function findRowByKey(key) {
+  return (allRows || []).find((row) => buildRowKey(row) === key) || null;
+}
+
+function formatDeadline(value) {
+  const text = String(value || "").trim();
+  if (!text) return "";
+  const parts = text.split("-");
+  if (parts.length !== 3) return text;
+  return `${parts[2]}/${parts[1]}/${parts[0]}`;
+}
+
+function getCurrentMonthLabel() {
+  return new Intl.DateTimeFormat("pt-BR", { month: "long" }).format(new Date());
+}
+
+function buildDeviceLegendLine(parts) {
+  return `<p>${parts.filter(Boolean).join(" | ")}</p>`;
+}
+
+function isAwaitingStart(progress) {
+  if (!progress) return false;
+  const target = parseNumber(progress?.target);
+  const done = parseNumber(progress?.done);
+  const rejected = parseNumber(progress?.rejected);
+  if (target <= 0) return false;
+  if (progress?.startedAt || progress?.productionFinalizedAt) return false;
+  return done <= 0 && rejected <= 0;
 }
 
 function loadDailyProgress() {
@@ -627,6 +679,150 @@ function applyCompletionState(progress) {
   };
 }
 
+function startQueuedDevice(key) {
+  const current = dailyProgress[key];
+  if (!current) return;
+  const target = parseNumber(current.target);
+  dailyProgress[key] = {
+    ...current,
+    startedAt: new Date().toISOString(),
+    done: parseNumber(current.done),
+    rejected: parseNumber(current.rejected),
+  };
+  saveDailyProgress();
+  saveTodayHistoryForDevice(key, target, parseNumber(current.done), parseNumber(current.rejected));
+  sendAuditEvent("production_started", { key, target, deadline: String(current.deadline || "") });
+  renderSiglaButtons(allRows);
+  renderSavedDevices();
+  renderQualityPanel();
+  updateKpis();
+}
+
+function completeInProgressDevice(key) {
+  const current = dailyProgress[key];
+  if (!current) return;
+  const currentTarget = parseNumber(current.target);
+  const currentDone = parseNumber(current.done);
+  const currentRejected = parseNumber(current.rejected);
+  const target = currentTarget > 0 ? currentTarget : (currentDone > 0 ? currentDone : 1);
+  const done = target;
+  dailyProgress[key] = applyCompletionState({
+    ...current,
+    target,
+    done,
+    rejected: currentRejected,
+  });
+  dailyProgress[key] = {
+    ...dailyProgress[key],
+    productionFinalizedAt: new Date().toISOString(),
+    completedAt: new Date().toISOString(),
+    testedAt: null,
+  };
+  saveDailyProgress();
+  saveTodayHistoryForDevice(key, target, done, currentRejected);
+  sendAuditEvent("production_marked_complete", {
+    key,
+    target,
+    done,
+    rejected: currentRejected,
+  });
+  renderSiglaButtons(allRows);
+  renderSavedDevices();
+  renderQualityPanel();
+  updateKpis();
+}
+
+function moveInProgressDeviceBackToQueue(key) {
+  const current = dailyProgress[key];
+  if (!current) return;
+  const done = parseNumber(current.done);
+  const rejected = parseNumber(current.rejected);
+  if (done > 0 || rejected > 0) {
+    const shouldReset = window.confirm(
+      "Esse dispositivo ja tem producao lancada. Voltar para aguardando inicio vai zerar produzido e reprovado. Deseja continuar?"
+    );
+    if (!shouldReset) return;
+  }
+  dailyProgress[key] = {
+    ...current,
+    startedAt: null,
+    done: 0,
+    rejected: 0,
+    productionFinalizedAt: null,
+    completedAt: null,
+    testedAt: null,
+  };
+  saveDailyProgress();
+  saveTodayHistoryForDevice(key, parseNumber(dailyProgress[key].target), 0, 0);
+  sendAuditEvent("production_moved_back_to_queue", {
+    key,
+    target: parseNumber(dailyProgress[key].target),
+  });
+  renderSiglaButtons(allRows);
+  renderSavedDevices();
+  renderQualityPanel();
+  updateKpis();
+}
+
+function bindDragSource(container) {
+  if (!container) return;
+
+  container.addEventListener("dragstart", (event) => {
+    const card = event.target.closest(".saved-card[draggable='true']");
+    if (!card) return;
+    const key = String(card.dataset.key || "");
+    if (!key) return;
+    draggedDeviceKey = key;
+    card.classList.add("dragging");
+    if (event.dataTransfer) {
+      event.dataTransfer.effectAllowed = "move";
+      event.dataTransfer.setData("text/plain", key);
+    }
+  });
+
+  container.addEventListener("dragend", (event) => {
+    const card = event.target.closest(".saved-card");
+    if (card) {
+      card.classList.remove("dragging");
+    }
+    draggedDeviceKey = "";
+  });
+}
+
+function bindDragTarget(container, acceptedStage, onDropAction) {
+  if (!container) return;
+
+  container.addEventListener("dragover", (event) => {
+    if (!draggedDeviceKey) return;
+    const progress = dailyProgress[draggedDeviceKey];
+    if (!progress) return;
+    const stage = progress?.startedAt ? "in-progress" : "queued";
+    if (stage !== acceptedStage) return;
+    event.preventDefault();
+    if (event.dataTransfer) {
+      event.dataTransfer.dropEffect = "move";
+    }
+    container.classList.add("drag-target");
+  });
+
+  container.addEventListener("dragleave", (event) => {
+    if (event.currentTarget === event.target || !container.contains(event.relatedTarget)) {
+      container.classList.remove("drag-target");
+    }
+  });
+
+  container.addEventListener("drop", (event) => {
+    if (!draggedDeviceKey) return;
+    const progress = dailyProgress[draggedDeviceKey];
+    const stage = progress?.startedAt ? "in-progress" : "queued";
+    container.classList.remove("drag-target");
+    if (stage !== acceptedStage) return;
+    event.preventDefault();
+    onDropAction(draggedDeviceKey);
+    draggedDeviceKey = "";
+  });
+}
+
 function pruneExpiredCompletedDevices() {
   // Mantem historico de finalizados sem expurgo automatico.
 }
@@ -957,32 +1153,51 @@ function openSiglaModal(row) {
 
 function renderSiglaButtons(rows) {
   if (!elements.siglaButtons) return;
-  const normalizedSearch = devicePickerSearchTerm.trim().toLowerCase();
-  const rowsToShow = rows.filter((row) => {
-    if (!normalizedSearch) return true;
-    return row.sigla.toLowerCase().includes(normalizedSearch) || row.codigo.toLowerCase().includes(normalizedSearch);
-  });
-
-  if (elements.devicePickerTools) {
-    elements.devicePickerTools.classList.toggle("collapsed", !devicePickerOpen);
+  if (elements.devicePickerSelect) {
+    const options = rows
+      .slice()
+      .sort((a, b) => a.sigla.localeCompare(b.sigla, "pt-BR") || a.codigo.localeCompare(b.codigo, "pt-BR"))
+      .map((row) => `<option value="${buildRowKey(row)}">${escapeHtml(row.sigla)} - ${escapeHtml(row.codigo)}</option>`)
+      .join("");
+    elements.devicePickerSelect.innerHTML = `<option value="">Selecione um dispositivo...</option>${options}`;
   }
-  elements.siglaButtons.classList.toggle("collapsed", !devicePickerOpen);
-  elements.siglaButtons.innerHTML = rowsToShow
-    .map((row) => {
-      return `<button type="button" class="sigla-btn" data-sigla="${row.sigla}" data-codigo="${row.codigo}">
-        <span class="sigla-name">${row.sigla}</span>
-        <span class="sigla-meta">Codigo: ${row.codigo}</span>
-      </button>`;
+
+  const queuedEntries = Object.entries(dailyProgress)
+    .map(([key, progress]) => {
+      if (!isAwaitingStart(progress)) return null;
+      const row = findRowByKey(key);
+      const [sigla, codigo] = key.split("__");
+      return {
+        key,
+        sigla: row?.sigla || sigla,
+        codigo: row?.codigo || codigo,
+        target: parseNumber(progress?.target),
+        deadline: String(progress?.deadline || ""),
+      };
     })
+    .filter(Boolean)
+    .sort((a, b) => a.sigla.localeCompare(b.sigla, "pt-BR") || a.codigo.localeCompare(b.codigo, "pt-BR"));
+
+  elements.siglaButtons.innerHTML = queuedEntries
+    .map(
+      (item) => `<article class="saved-card pending-start" data-key="${item.key}" data-drag-stage="queued" draggable="true">
+        ${buildDeleteIconButton("queue-delete", item.key)}
+        <h4>${escapeHtml(item.codigo)} - ${escapeHtml(item.sigla)}</h4>
+        ${buildDeviceLegendLine([
+          `Prod. <strong>${formatNumber(item.target)}</strong>`,
+          item.deadline ? `Term. <strong>${formatDeadline(item.deadline)}</strong>` : "Term. <strong>-</strong>",
+        ])}
+        <span class="saved-tag">Aguardando inicio</span>
+        <div class="saved-actions">
+          ${buildEditIconButton("queue-edit", item.key)}
+        </div>
+      </article>`
+    )
     .join("");
 
-  if (!rowsToShow.length) {
-    const emptyMessage = normalizedSearch
-      ? "Nenhum dispositivo encontrado para a pesquisa."
-      : "Nenhum dispositivo selecionado para hoje.";
-    elements.siglaButtons.innerHTML = `<div class="devices-empty">${emptyMessage}</div>`;
+  if (!queuedEntries.length) {
+    elements.siglaButtons.innerHTML = '<div class="devices-empty">Nenhum dispositivo selecionado para hoje.</div>';
   }
-
 }
 
 function renderSavedDevices() {
@@ -998,14 +1213,16 @@ function renderSavedDevices() {
       const rejected = parseNumber(progress?.rejected);
       const remaining = Math.max(target - done, 0);
       const isDone = target > 0 && remaining === 0;
+      const startedAt = progress?.startedAt || null;
+      const deadline = String(progress?.deadline || "");
       const completedAt = progress?.completedAt || null;
       const testedAt = progress?.testedAt || null;
       const productionFinalizedAt = progress?.productionFinalizedAt || null;
-      return { key, sigla, codigo, target, done, rejected, remaining, isDone, completedAt, testedAt, productionFinalizedAt };
+      return { key, sigla, codigo, target, done, rejected, remaining, isDone, startedAt, deadline, completedAt, testedAt, productionFinalizedAt };
     })
     .filter((item) => item.target > 0 || item.done > 0);
 
-  const inProgressEntries = savedEntries.filter((item) => !item.productionFinalizedAt);
+  const inProgressEntries = savedEntries.filter((item) => item.startedAt && !item.productionFinalizedAt);
   const doneEntries = Object.values(finalProductsHistory)
     .filter((item) => item && item.productionFinalizedAt && item.testedAt)
     .sort((a, b) => {
@@ -1020,7 +1237,7 @@ function renderSavedDevices() {
       const isEditing = editingDeviceKey === item.key;
       if (isEditing) {
         return `<article class="saved-card${item.isDone ? " done" : ""}" data-key="${item.key}">
-      <h4>${item.sigla}</h4>
+      <h4>${item.codigo} - ${item.sigla}</h4>
       <label class="saved-label">A produzir</label>
       <input class="saved-input saved-target-input" type="number" min="0" step="1" value="${item.target}" />
       <label class="saved-label">Produzido</label>
@@ -1032,17 +1249,20 @@ function renderSavedDevices() {
     </article>`;
       }
 
-      return `<article class="saved-card${item.isDone ? " done" : ""}" data-key="${item.key}">
-      <h4>${item.sigla}</h4>
-      <p>A produzir: <strong>${formatNumber(item.target)}</strong></p>
-      <p>Produzido: <strong>${formatNumber(item.done)}</strong></p>
-      <p>Reprovado: <strong>${formatNumber(item.rejected)}</strong></p>
-      <p>Falta: <strong>${formatNumber(item.remaining)}</strong></p>
+        return `<article class="saved-card${item.isDone ? " done" : ""}" data-key="${item.key}" data-drag-stage="in-progress" draggable="true">
+      ${buildDeleteIconButton("delete", item.key)}
+      <h4>${item.codigo} - ${item.sigla}</h4>
+      ${buildDeviceLegendLine([
+        `Prod. <strong>${formatNumber(item.target)}</strong>`,
+        `Feito <strong>${formatNumber(item.done)}</strong>`,
+        `Repr. <strong>${formatNumber(item.rejected)}</strong>`,
+        `Falta <strong>${formatNumber(item.remaining)}</strong>`,
+      ])}
+      ${buildDeviceLegendLine([item.deadline ? `Term. <strong>${formatDeadline(item.deadline)}</strong>` : "Term. <strong>-</strong>"])}
       <span class="saved-tag">${item.isDone ? "Pronto para finalizar" : "Em andamento"}</span>
       <div class="saved-actions">
-        <button type="button" class="saved-action-btn saved-edit-btn" data-action="edit" data-key="${item.key}">Editar</button>
+        ${buildEditIconButton("edit", item.key)}
         <button type="button" class="saved-action-btn saved-complete-btn" data-action="complete" data-key="${item.key}">Concluido</button>
-        <button type="button" class="saved-action-btn saved-delete-btn" data-action="delete" data-key="${item.key}">Excluir</button>
       </div>
     </article>`;
     })
@@ -1057,7 +1277,7 @@ function renderSavedDevices() {
             const isEditing = editingDeviceKey === item.key;
             if (isEditing) {
               return `<article class="saved-card done" data-key="${item.key}">
-      <h4>${item.sigla}</h4>
+      <h4>${item.codigo} - ${item.sigla}</h4>
       <label class="saved-label">A produzir</label>
       <input class="saved-input saved-target-input" type="number" min="0" step="1" value="${item.target}" />
       <label class="saved-label">Produzido</label>
@@ -1067,15 +1287,17 @@ function renderSavedDevices() {
       <div class="saved-actions">
         <button type="button" class="saved-action-btn saved-cancel-btn" data-action="cancel" data-key="${item.key}">Cancelar</button>
         <button type="button" class="saved-action-btn saved-save-btn" data-action="save" data-key="${item.key}">Salvar</button>
-      </div>
+              </div>
     </article>`;
             }
             return `<article class="saved-card done" data-key="${item.key}">
-      <h4>${item.sigla}</h4>
-      <p>A produzir: <strong>${formatNumber(item.target)}</strong></p>
-      <p>Produzido: <strong>${formatNumber(item.done)}</strong></p>
-      <p>Reprovado: <strong>${formatNumber(item.rejected)}</strong></p>
-      <p>Falta: <strong>${formatNumber(item.remaining)}</strong></p>
+      <h4>${item.codigo} - ${item.sigla}</h4>
+      ${buildDeviceLegendLine([
+        `Prod. <strong>${formatNumber(item.target)}</strong>`,
+        `Feito <strong>${formatNumber(item.done)}</strong>`,
+        `Repr. <strong>${formatNumber(item.rejected)}</strong>`,
+        `Falta <strong>${formatNumber(item.remaining)}</strong>`,
+      ])}
       <span class="saved-tag">Finalizado</span>
     </article>`;
           }
@@ -1131,6 +1353,11 @@ function renderQualityPanel() {
 
   if (elements.qualityToggleBtn) {
     elements.qualityToggleBtn.classList.toggle("attention-blink", waitingTestEntries.length > 0);
+    elements.qualityToggleBtn.classList.toggle("has-pending", waitingTestEntries.length > 0);
+  }
+  if (elements.qualityToggleBadge) {
+    elements.qualityToggleBadge.textContent = String(waitingTestEntries.length);
+    elements.qualityToggleBadge.classList.toggle("hidden", waitingTestEntries.length <= 0);
   }
 
   elements.qualityAwaitingList.innerHTML = waitingTestEntries.length
@@ -1211,10 +1438,39 @@ function renderQualityPanel() {
 
 function renderQualityRejectedIndicator() {
   if (!elements.qualityRejectedChart || typeof Chart === "undefined") return;
-  const deviceStats = buildDeviceQualityHistoryStats();
+  const currentMonth = new Date().getMonth();
+  const currentYear = new Date().getFullYear();
+  if (elements.qualityMonthlyChartTitle) {
+    const monthLabel = getCurrentMonthLabel();
+    elements.qualityMonthlyChartTitle.textContent = `Produzidos em ${monthLabel}`;
+  }
+  const monthlyApprovedByDevice = Object.values(finalProductsHistory || {})
+    .filter((item) => {
+      const testedAt = item?.testedAt ? new Date(item.testedAt) : null;
+      return testedAt && Number.isFinite(testedAt.getTime()) && testedAt.getMonth() === currentMonth && testedAt.getFullYear() === currentYear;
+    })
+    .reduce((acc, item) => {
+      const key = String(item?.key || `${item?.sigla || ""}__${item?.codigo || ""}`);
+      const sigla = String(item?.sigla || "").trim();
+      const codigo = String(item?.codigo || "").trim();
+      const approvedQty = Math.max(parseNumber(item?.done) - parseNumber(item?.rejected), 0);
+      if (!approvedQty) return acc;
+      if (!acc[key]) {
+        acc[key] = {
+          label: sigla ? `${sigla}` : codigo || key,
+          sigla,
+          codigo,
+          quantity: 0,
+        };
+      }
+      acc[key].quantity += approvedQty;
+      return acc;
+    }, {});
+
+  const deviceStats = Object.values(monthlyApprovedByDevice).sort((a, b) => b.quantity - a.quantity || a.label.localeCompare(b.label, "pt-BR"));
   const labels = deviceStats.length ? deviceStats.map((item) => item.label) : ["Sem dados"];
-  const errorPercentValues = deviceStats.length ? deviceStats.map((item) => Number(item.avgErrorPercent.toFixed(2))) : [0];
-  const nextSignature = JSON.stringify({ labels, errorPercentValues });
+  const monthlyValues = deviceStats.length ? deviceStats.map((item) => item.quantity) : [0];
+  const nextSignature = JSON.stringify({ labels, monthlyValues });
 
   if (nextSignature === qualityRejectedSignature && qualityRejectedChartInstance) return;
   qualityRejectedSignature = nextSignature;
@@ -1225,9 +1481,9 @@ function renderQualityRejectedIndicator() {
       labels,
       datasets: [
         {
-          label: "Erro medio (%)",
-          data: errorPercentValues,
-          backgroundColor: "#d14d4d",
+          label: "Produzidos no mes",
+          data: monthlyValues,
+          backgroundColor: "#1f7cc8",
           borderWidth: 0,
         },
       ],
@@ -1245,15 +1501,13 @@ function renderQualityRejectedIndicator() {
           callbacks: {
             label(context) {
               const item = deviceStats[context.dataIndex];
-              if (!item) return `Erro medio: ${formatNumber(context.parsed.y || context.parsed.x || 0)}%`;
-              return `Erro medio: ${item.avgErrorPercent.toFixed(2)}%`;
+              if (!item) return `Quantidade: ${formatNumber(context.parsed.y || context.parsed.x || 0)}`;
+              return `Quantidade: ${formatNumber(item.quantity)}`;
             },
             afterLabel(context) {
               const item = deviceStats[context.dataIndex];
               if (!item) return "";
-              return `Reprovado total: ${formatNumber(item.rejectedTotal)} | Produzido total: ${formatNumber(
-                item.doneTotal
-              )} | Dias: ${formatNumber(item.days)} | Reprovado medio/dia: ${item.avgRejectedPerDay.toFixed(2)}`;
+              return `Codigo: ${item.codigo || "-"}`;
             },
           },
         },
@@ -1270,7 +1524,7 @@ function renderQualityRejectedIndicator() {
           beginAtZero: true,
           ticks: {
             callback(value) {
-              return `${value}%`;
+              return formatNumber(value);
             },
           },
         },
@@ -1479,10 +1733,103 @@ function bindEvents() {
     }
   });
 
-  if (elements.devicePickerSearch) {
-    elements.devicePickerSearch.addEventListener("input", (event) => {
-      devicePickerSearchTerm = event.target.value || "";
+  if (elements.devicePickerAddBtn) {
+    elements.devicePickerAddBtn.addEventListener("click", () => {
+      const key = String(elements.devicePickerSelect?.value || "").trim();
+      const target = parseNumber(elements.devicePickerTarget?.value);
+      const deadline = String(elements.devicePickerDeadline?.value || "").trim();
+      if (!key) {
+        window.alert("Selecione um dispositivo.");
+        return;
+      }
+      if (target <= 0) {
+        window.alert("Informe uma quantidade maior que zero.");
+        return;
+      }
+      const row = findRowByKey(key);
+      if (!row) {
+        window.alert("Dispositivo nao encontrado.");
+        return;
+      }
+      const current = dailyProgress[key] || {};
+      if (current?.startedAt || current?.productionFinalizedAt) {
+        window.alert("Esse dispositivo ja esta em andamento ou finalizado.");
+        return;
+      }
+      dailyProgress[key] = {
+        ...current,
+        target,
+        done: 0,
+        rejected: 0,
+        deadline,
+        startedAt: null,
+        productionFinalizedAt: null,
+        completedAt: null,
+        testedAt: null,
+      };
+      saveDailyProgress();
+      sendAuditEvent("production_queued", {
+        key,
+        sigla: row.sigla,
+        codigo: row.codigo,
+        target,
+        deadline,
+      });
+      if (elements.devicePickerSelect) elements.devicePickerSelect.value = "";
+      if (elements.devicePickerTarget) elements.devicePickerTarget.value = "";
+      if (elements.devicePickerDeadline) elements.devicePickerDeadline.value = "";
       renderSiglaButtons(allRows);
+      renderSavedDevices();
+      renderQualityPanel();
+    });
+  }
+
+  if (elements.siglaButtons) {
+    elements.siglaButtons.addEventListener("click", (event) => {
+      const actionBtn = event.target.closest("[data-action]");
+      if (!actionBtn) return;
+      const action = String(actionBtn.dataset.action || "");
+      const key = String(actionBtn.dataset.key || "");
+      if (!key || !dailyProgress[key]) return;
+
+      if (action === "queue-delete") {
+        const shouldDelete = window.confirm("Tem certeza que deseja excluir este dispositivo?");
+        if (!shouldDelete) return;
+        delete dailyProgress[key];
+        saveDailyProgress();
+        sendAuditEvent("production_queue_deleted", { key });
+        renderSiglaButtons(allRows);
+        renderSavedDevices();
+        return;
+      }
+
+      if (action === "queue-edit") {
+        const nextTarget = window.prompt("Informe a nova quantidade para produzir:", String(parseNumber(dailyProgress[key]?.target)));
+        if (nextTarget === null) return;
+        const target = parseNumber(nextTarget);
+        if (target <= 0) {
+          window.alert("Informe uma quantidade maior que zero.");
+          return;
+        }
+        const nextDeadline = window.prompt(
+          "Informe a data de termino (AAAA-MM-DD), se quiser manter ou alterar:",
+          String(dailyProgress[key]?.deadline || "")
+        );
+        if (nextDeadline === null) return;
+        dailyProgress[key] = {
+          ...(dailyProgress[key] || {}),
+          target,
+          deadline: String(nextDeadline || "").trim(),
+        };
+        saveDailyProgress();
+        sendAuditEvent("production_queue_updated", { key, target, deadline: String(nextDeadline || "").trim() });
+        renderSiglaButtons(allRows);
+        return;
+      }
+
+      if (action === "queue-start") {
+        startQueuedDevice(key);
+      }
     });
   }
 
@@ -1722,36 +2069,7 @@ function bindEvents() {
     }
 
     if (action === "complete") {
-      const current = dailyProgress[key] || {};
-      const currentTarget = parseNumber(current.target);
-      const currentDone = parseNumber(current.done);
-      const currentRejected = parseNumber(current.rejected);
-      const target = currentTarget > 0 ? currentTarget : (currentDone > 0 ? currentDone : 1);
-      const done = target;
-      dailyProgress[key] = applyCompletionState({
-        ...current,
-        target,
-        done,
-        rejected: currentRejected,
-      });
-      dailyProgress[key] = {
-        ...dailyProgress[key],
-        productionFinalizedAt: new Date().toISOString(),
-        completedAt: new Date().toISOString(),
-        testedAt: null,
-      };
-      saveDailyProgress();
-      saveTodayHistoryForDevice(key, target, done, currentRejected);
-      sendAuditEvent("production_marked_complete", {
-        key,
-        target,
-        done,
-        rejected: currentRejected,
-      });
-      renderSiglaButtons(allRows);
-      renderSavedDevices();
-      renderQualityPanel();
-      updateKpis();
+      completeInProgressDevice(key);
       return;
     }
 
@@ -1787,6 +2105,11 @@ function bindEvents() {
   };
 
   elements.savedDevices.addEventListener("click", handleSavedDeviceActions);
+  bindDragSource(elements.siglaButtons);
+  bindDragSource(elements.savedDevices);
+  bindDragTarget(elements.awaitingPanel, "in-progress", moveInProgressDeviceBackToQueue);
+  bindDragTarget(elements.progressPanel, "queued", startQueuedDevice);
+  bindDragTarget(elements.donePanel, "in-progress", completeInProgressDevice);
 }
 
 async function init() {
