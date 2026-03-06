@@ -89,7 +89,6 @@ let weeklyProducedChartInstance = null;
 let monthlyProducedChartInstance = null;
 let annualProducedChartInstance = null;
 let qualityRejectedChartInstance = null;
-let currentChartRows = [];
 let devicePickerOpen = true;
 let devicePickerSearchTerm = "";
 let selectedRowKey = "";
@@ -110,6 +109,7 @@ let excludedProductsSyncTimer = null;
 let realtimeEventSource = null;
 let realtimeRefreshTimer = null;
 let realtimeConnected = false;
+let qualityRejectedSignature = "";
 
 function parseNumber(value) {
   const num = Number(String(value ?? "").replace(",", ".").trim());
@@ -736,16 +736,22 @@ function renderTable(rows) {
     .join("");
 }
 
-function updateKpis(rows) {
-  const totalAnual = rows.reduce((acc, row) => acc + row.total, 0);
-  const monthlyTotals = MONTHS.map((_, idx) => rows.reduce((acc, row) => acc + row.months[idx], 0));
-  const peakValue = Math.max(...monthlyTotals, 0);
-  renderProducedCharts(rows, monthlyTotals, totalAnual, peakValue);
+function updateKpis() {
+  renderProducedCharts();
 }
 
-function renderProducedCharts(rows, monthlyTotals, totalAnual, peakValue) {
+function upsertChart(instance, canvas, config) {
+  if (!canvas || typeof Chart === "undefined") return instance;
+  if (!instance) return new Chart(canvas, config);
+  instance.config.type = config.type;
+  instance.data = config.data;
+  instance.options = config.options;
+  instance.update("none");
+  return instance;
+}
+
+function renderProducedCharts() {
   if (typeof Chart === "undefined") return;
-  currentChartRows = rows;
 
   // Semanal (ultimos 7 dias no historico local)
   if (elements.weeklyProducedChart) {
@@ -764,8 +770,7 @@ function renderProducedCharts(rows, monthlyTotals, totalAnual, peakValue) {
       values.push(totalDay);
     }
 
-    if (weeklyProducedChartInstance) weeklyProducedChartInstance.destroy();
-    weeklyProducedChartInstance = new Chart(elements.weeklyProducedChart, {
+    weeklyProducedChartInstance = upsertChart(weeklyProducedChartInstance, elements.weeklyProducedChart, {
       type: "line",
       data: {
         labels,
@@ -813,8 +818,7 @@ function renderProducedCharts(rows, monthlyTotals, totalAnual, peakValue) {
       monthlyProduced[month] += totalDay;
     });
 
-    if (monthlyProducedChartInstance) monthlyProducedChartInstance.destroy();
-    monthlyProducedChartInstance = new Chart(elements.monthlyProducedChart, {
+    monthlyProducedChartInstance = upsertChart(monthlyProducedChartInstance, elements.monthlyProducedChart, {
       type: "bar",
       data: {
         labels: MONTHS,
@@ -858,8 +862,7 @@ function renderProducedCharts(rows, monthlyTotals, totalAnual, peakValue) {
     const years = Object.keys(annualTotals).sort();
     const yearValues = years.map((year) => annualTotals[year]);
 
-    if (annualProducedChartInstance) annualProducedChartInstance.destroy();
-    annualProducedChartInstance = new Chart(elements.annualProducedChart, {
+    annualProducedChartInstance = upsertChart(annualProducedChartInstance, elements.annualProducedChart, {
       type: "bar",
       data: {
         labels: years.length ? years : [String(new Date().getFullYear())],
@@ -1211,12 +1214,12 @@ function renderQualityRejectedIndicator() {
   const deviceStats = buildDeviceQualityHistoryStats();
   const labels = deviceStats.length ? deviceStats.map((item) => item.label) : ["Sem dados"];
   const errorPercentValues = deviceStats.length ? deviceStats.map((item) => Number(item.avgErrorPercent.toFixed(2))) : [0];
+  const nextSignature = JSON.stringify({ labels, errorPercentValues });
 
-  if (qualityRejectedChartInstance) {
-    qualityRejectedChartInstance.destroy();
-  }
+  if (nextSignature === qualityRejectedSignature && qualityRejectedChartInstance) return;
+  qualityRejectedSignature = nextSignature;
 
-  qualityRejectedChartInstance = new Chart(elements.qualityRejectedChart, {
+  qualityRejectedChartInstance = upsertChart(qualityRejectedChartInstance, elements.qualityRejectedChart, {
     type: "bar",
     data: {
       labels,
@@ -1374,11 +1377,9 @@ function applyFiltersAndSort() {
     return b.total - a.total;
   });
 
-  updateKpis(filtered);
+  updateKpis();
   renderTable(filtered);
   renderSiglaButtons(allRows);
-  renderSavedDevices();
-  renderQualityPanel();
 }
 
 function parseCsvText(csvText) {
@@ -1511,7 +1512,7 @@ function bindEvents() {
     renderSiglaButtons(allRows);
     renderSavedDevices();
     renderQualityPanel();
-    updateKpis(currentChartRows.length ? currentChartRows : allRows);
+    updateKpis();
     elements.modal.close();
   });
 
@@ -1716,7 +1717,7 @@ function bindEvents() {
       renderSiglaButtons(allRows);
       renderSavedDevices();
       renderQualityPanel();
-      updateKpis(currentChartRows.length ? currentChartRows : allRows);
+      updateKpis();
       return;
     }
 
@@ -1750,7 +1751,7 @@ function bindEvents() {
       renderSiglaButtons(allRows);
       renderSavedDevices();
       renderQualityPanel();
-      updateKpis(currentChartRows.length ? currentChartRows : allRows);
+      updateKpis();
       return;
     }
 
@@ -1781,7 +1782,7 @@ function bindEvents() {
       renderSiglaButtons(allRows);
       renderSavedDevices();
       renderQualityPanel();
-      updateKpis(currentChartRows.length ? currentChartRows : allRows);
+      updateKpis();
     }
   };
 
