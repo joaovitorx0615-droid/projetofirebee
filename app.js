@@ -65,9 +65,6 @@ const elements = {
   qualityAwaitingList: document.querySelector("#quality-awaiting-list"),
   qualityDoneList: document.querySelector("#quality-done-list"),
   qualityRejectedChart: document.querySelector("#quality-rejected-chart"),
-  qualityApprovedBoardsChart: document.querySelector("#quality-approved-boards-chart"),
-  qualityApprovedProductsChart: document.querySelector("#quality-approved-products-chart"),
-  qualityRejectedBoardsChart: document.querySelector("#quality-rejected-boards-chart"),
   siglaButtons: document.querySelector("#sigla-buttons"),
   devicePickerTools: document.querySelector("#device-picker-tools"),
   devicePickerSearch: document.querySelector("#device-picker-search"),
@@ -92,9 +89,6 @@ let weeklyProducedChartInstance = null;
 let monthlyProducedChartInstance = null;
 let annualProducedChartInstance = null;
 let qualityRejectedChartInstance = null;
-let qualityApprovedBoardsChartInstance = null;
-let qualityApprovedProductsChartInstance = null;
-let qualityRejectedBoardsChartInstance = null;
 let currentChartRows = [];
 let devicePickerOpen = true;
 let devicePickerSearchTerm = "";
@@ -116,7 +110,6 @@ let excludedProductsSyncTimer = null;
 let realtimeEventSource = null;
 let realtimeRefreshTimer = null;
 let realtimeConnected = false;
-let completionRefreshSignature = "";
 
 function parseNumber(value) {
   const num = Number(String(value ?? "").replace(",", ".").trim());
@@ -217,62 +210,6 @@ function toSafeChartValue(value, max = MAX_CHART_PRODUCTION_PER_ENTRY) {
   const n = parseNumber(value);
   if (!Number.isFinite(n) || n < 0) return 0;
   return Math.min(n, max);
-}
-
-function buildRecentDateKeys(days = 7) {
-  const keys = [];
-  for (let i = days - 1; i >= 0; i -= 1) {
-    const d = new Date();
-    d.setDate(d.getDate() - i);
-    keys.push(toLocalDateKey(d));
-  }
-  return keys;
-}
-
-function dateKeyToShortLabel(dateKey) {
-  const day = String(dateKey || "").slice(8, 10);
-  const month = String(dateKey || "").slice(5, 7);
-  if (!day || !month) return String(dateKey || "");
-  return `${day}/${month}`;
-}
-
-function createQualityMetricChart(targetCanvas, currentInstance, series, chartLabel, color) {
-  if (!targetCanvas || typeof Chart === "undefined") return currentInstance;
-  if (currentInstance) {
-    currentInstance.destroy();
-  }
-
-  return new Chart(targetCanvas, {
-    type: "bar",
-    data: {
-      labels: series.labels,
-      datasets: [
-        {
-          label: chartLabel,
-          data: series.values,
-          backgroundColor: color,
-          borderWidth: 0,
-        },
-      ],
-    },
-    options: {
-      responsive: true,
-      maintainAspectRatio: false,
-      plugins: {
-        legend: { display: false },
-      },
-      scales: {
-        y: {
-          beginAtZero: true,
-          ticks: {
-            callback(value) {
-              return formatNumber(value);
-            },
-          },
-        },
-      },
-    },
-  });
 }
 
 function buildDeviceQualityHistoryStats() {
@@ -551,29 +488,6 @@ function toLocalDateKey(date = new Date()) {
   return `${year}-${month}-${day}`;
 }
 
-function isDateKeyToday(isoDateLike) {
-  const text = String(isoDateLike || "").trim();
-  if (!text) return false;
-  const date = new Date(text);
-  if (!Number.isFinite(date.getTime())) return false;
-  return toLocalDateKey(date) === toLocalDateKey();
-}
-
-function shouldHideFromAwaitingStart(progress) {
-  const target = parseNumber(progress?.target);
-  const done = parseNumber(progress?.done);
-  const rejected = parseNumber(progress?.rejected);
-  const started = target > 0 || done > 0 || rejected > 0;
-  if (!started) return false;
-
-  // Se o item foi finalizado em um dia anterior, volta para "Aguardando inicio" no dia atual.
-  if (progress?.productionFinalizedAt && !isDateKeyToday(progress.productionFinalizedAt)) {
-    return false;
-  }
-
-  return true;
-}
-
 function showSystemAlert(message, tone = "warn") {
   if (!elements.systemAlert) return;
   elements.systemAlert.textContent = String(message || "");
@@ -722,7 +636,6 @@ function buildFinalProductRecord(key, progress) {
   const target = parseNumber(progress?.target);
   const done = parseNumber(progress?.done);
   const rejected = getProgressRejectedTotal(progress);
-  const rejectionEntries = normalizeRejectionEntries(progress);
   const remaining = Math.max(target - done, 0);
   return {
     key,
@@ -731,14 +644,11 @@ function buildFinalProductRecord(key, progress) {
     target,
     done,
     rejected,
-    rejectionEntries,
     remaining,
     productionFinalizedAt: progress?.productionFinalizedAt || null,
-    plateTestedAt: progress?.plateTestedAt || null,
-    productTestedAt: progress?.productTestedAt || progress?.testedAt || null,
     testedAt: progress?.testedAt || null,
     completedAt: progress?.completedAt || null,
-    updatedAt: null,
+    updatedAt: new Date().toISOString(),
   };
 }
 
@@ -748,45 +658,11 @@ function syncFinalProductsFromDailyProgress() {
     if (!progress?.productionFinalizedAt || !progress?.testedAt) return;
     const nextRecord = buildFinalProductRecord(key, progress);
     const prevRecord = finalProductsHistory[key];
-    const prevComparable = prevRecord
-      ? {
-          key: prevRecord.key,
-          sigla: prevRecord.sigla,
-          codigo: prevRecord.codigo,
-          target: parseNumber(prevRecord.target),
-          done: parseNumber(prevRecord.done),
-          rejected: parseNumber(prevRecord.rejected),
-          remaining: parseNumber(prevRecord.remaining),
-          productionFinalizedAt: prevRecord.productionFinalizedAt || null,
-          testedAt: prevRecord.testedAt || null,
-          completedAt: prevRecord.completedAt || null,
-        }
-      : null;
-    const nextComparable = {
-      key: nextRecord.key,
-      sigla: nextRecord.sigla,
-      codigo: nextRecord.codigo,
-      target: nextRecord.target,
-      done: nextRecord.done,
-      rejected: nextRecord.rejected,
-      remaining: nextRecord.remaining,
-      productionFinalizedAt: nextRecord.productionFinalizedAt,
-      testedAt: nextRecord.testedAt,
-      completedAt: nextRecord.completedAt,
-    };
-    const prevSignature = JSON.stringify(prevComparable || {});
-    const nextSignature = JSON.stringify(nextComparable);
+    const prevSignature = JSON.stringify(prevRecord || {});
+    const nextSignature = JSON.stringify(nextRecord);
     if (prevSignature !== nextSignature) {
-      finalProductsHistory[key] = {
-        ...nextRecord,
-        updatedAt: new Date().toISOString(),
-      };
+      finalProductsHistory[key] = nextRecord;
       changed = true;
-    } else if (prevRecord?.updatedAt) {
-      finalProductsHistory[key] = {
-        ...nextRecord,
-        updatedAt: prevRecord.updatedAt,
-      };
     }
   });
 
@@ -865,23 +741,6 @@ function updateKpis(rows) {
   const monthlyTotals = MONTHS.map((_, idx) => rows.reduce((acc, row) => acc + row.months[idx], 0));
   const peakValue = Math.max(...monthlyTotals, 0);
   renderProducedCharts(rows, monthlyTotals, totalAnual, peakValue);
-}
-
-function buildCompletionSignature() {
-  const keys = Object.keys(dailyProgress || {}).sort();
-  return keys
-    .map((key) => {
-      const item = dailyProgress[key] || {};
-      return `${key}|${item.productionFinalizedAt || ""}|${item.testedAt || ""}|${item.plateTestedAt || ""}`;
-    })
-    .join(";");
-}
-
-function refreshChartsOnProcessFinish(force = false) {
-  const nextSignature = buildCompletionSignature();
-  if (!force && nextSignature === completionRefreshSignature) return;
-  completionRefreshSignature = nextSignature;
-  updateKpis(allRows || []);
 }
 
 function renderProducedCharts(rows, monthlyTotals, totalAnual, peakValue) {
@@ -1107,14 +966,9 @@ function renderSiglaButtons(rows) {
   elements.siglaButtons.classList.toggle("collapsed", !devicePickerOpen);
   elements.siglaButtons.innerHTML = rowsToShow
     .map((row) => {
-      const key = buildRowKey(row);
-      const progress = dailyProgress[key] || {};
-      const target = parseNumber(progress.target);
-      const done = parseNumber(progress.done);
-      const remaining = Math.max(target - done, 0);
       return `<button type="button" class="sigla-btn" data-sigla="${row.sigla}" data-codigo="${row.codigo}">
         <span class="sigla-name">${row.sigla}</span>
-        <span class="sigla-meta">Falta: ${formatNumber(remaining)}</span>
+        <span class="sigla-meta">Codigo: ${row.codigo}</span>
       </button>`;
     })
     .join("");
@@ -1197,7 +1051,6 @@ function renderSavedDevices() {
     ? doneEntries
         .map(
           (item) => {
-            const finalRejectionEntries = normalizeRejectionEntries(item);
             const isEditing = editingDeviceKey === item.key;
             if (isEditing) {
               return `<article class="saved-card done" data-key="${item.key}">
@@ -1219,7 +1072,6 @@ function renderSavedDevices() {
       <p>A produzir: <strong>${formatNumber(item.target)}</strong></p>
       <p>Produzido: <strong>${formatNumber(item.done)}</strong></p>
       <p>Reprovado: <strong>${formatNumber(item.rejected)}</strong></p>
-      ${item.rejected > 0 ? buildRejectionEntriesHtml(finalRejectionEntries) : "<p>Motivos: <strong>Nenhum</strong></p>"}
       <p>Falta: <strong>${formatNumber(item.remaining)}</strong></p>
       <span class="saved-tag">Finalizado</span>
     </article>`;
@@ -1241,8 +1093,6 @@ function renderQualityPanel() {
       const remaining = Math.max(target - done, 0);
       const isDone = target > 0 && remaining === 0;
       const testedAt = progress?.testedAt || null;
-      const plateTestedAt = progress?.plateTestedAt || null;
-      const productTestedAt = progress?.productTestedAt || progress?.testedAt || null;
       const productionFinalizedAt = progress?.productionFinalizedAt || null;
       const rejectionReason = normalizeRejectionReason(progress);
       return {
@@ -1255,8 +1105,6 @@ function renderQualityPanel() {
         remaining,
         isDone,
         testedAt,
-        plateTestedAt,
-        productTestedAt,
         productionFinalizedAt,
         rejectionReason,
         rejectionEntries,
@@ -1272,24 +1120,9 @@ function renderQualityPanel() {
       const rejectionEntries = normalizeRejectionEntries(progress);
       const rejected = getRejectedTotalFromEntries(rejectionEntries);
       const testedAt = progress?.testedAt || null;
-      const plateTestedAt = progress?.plateTestedAt || null;
-      const productTestedAt = progress?.productTestedAt || progress?.testedAt || null;
       const productionFinalizedAt = progress?.productionFinalizedAt || null;
       const rejectionReason = normalizeRejectionReason(progress);
-      return {
-        key,
-        sigla,
-        codigo,
-        target,
-        done,
-        rejected,
-        testedAt,
-        plateTestedAt,
-        productTestedAt,
-        productionFinalizedAt,
-        rejectionReason,
-        rejectionEntries,
-      };
+      return { key, sigla, codigo, target, done, rejected, testedAt, productionFinalizedAt, rejectionReason, rejectionEntries };
     })
     .filter((item) => item.productionFinalizedAt && item.testedAt);
 
@@ -1308,13 +1141,10 @@ function renderQualityPanel() {
       <p>Codigo: <strong>${item.codigo}</strong></p>
       <p>Produzido: <strong>${formatNumber(item.done)}</strong> / ${formatNumber(item.target)}</p>
       <p>Reprovado: <strong>${formatNumber(item.rejected)}</strong></p>
-      <p>Teste de placas: <strong>${item.plateTestedAt ? "Concluido" : "Pendente"}</strong></p>
-      <p>Teste de produto acabado: <strong>${item.productTestedAt ? "Concluido" : "Pendente"}</strong></p>
       ${buildRejectionEntriesHtml(item.rejectionEntries)}
       <div class="saved-actions">
-        <button type="button" class="saved-action-btn saved-edit-btn" data-action="quality-plate-test" data-key="${item.key}">Registrar teste de placa</button>
         <button type="button" class="saved-action-btn saved-reject-btn" data-action="quality-reject-open" data-key="${item.key}">Reprovado</button>
-        <button type="button" class="saved-action-btn saved-save-btn" data-action="quality-product-test" data-key="${item.key}">Registrar teste de produto</button>
+        <button type="button" class="saved-action-btn saved-save-btn" data-action="quality-complete" data-key="${item.key}">Teste concluido</button>
       </div>
       <div class="quality-reject-editor${isEditingReject ? "" : " hidden"}" data-reject-editor-for="${item.key}">
         <div class="quality-reject-grid">
@@ -1366,8 +1196,6 @@ function renderQualityPanel() {
       <p>Codigo: <strong>${item.codigo}</strong></p>
       <p>Produzido: <strong>${formatNumber(item.done)}</strong> / ${formatNumber(item.target)}</p>
       <p>Reprovado: <strong>${formatNumber(item.rejected)}</strong></p>
-      <p>Teste de placas: <strong>${item.plateTestedAt ? "Concluido" : "Nao registrado"}</strong></p>
-      <p>Teste de produto acabado: <strong>${item.productTestedAt ? "Concluido" : "Nao registrado"}</strong></p>
       ${buildRejectionEntriesHtml(item.rejectionEntries)}
       <span class="saved-tag">Teste concluido</span>
     </article>`
@@ -1376,7 +1204,6 @@ function renderQualityPanel() {
     : `<div class="devices-empty">Nenhum teste concluido.</div>`;
 
   renderQualityRejectedIndicator();
-  renderQualitySummaryCharts();
 }
 
 function renderQualityRejectedIndicator() {
@@ -1449,77 +1276,6 @@ function renderQualityRejectedIndicator() {
   });
 }
 
-function renderQualitySummaryCharts() {
-  if (typeof Chart === "undefined") return;
-  const recentKeys = buildRecentDateKeys(7);
-  const labels = recentKeys.map(dateKeyToShortLabel);
-
-  const approvedBoardsByDay = {};
-  const rejectedBoardsByDay = {};
-  recentKeys.forEach((key) => {
-    approvedBoardsByDay[key] = 0;
-    rejectedBoardsByDay[key] = 0;
-  });
-
-  recentKeys.forEach((dateKey) => {
-    const dayData = productionHistory[dateKey] || {};
-    Object.entries(dayData).forEach(([deviceKey, item]) => {
-      if (isHistoryEntryExcluded(dateKey, deviceKey)) return;
-      const done = toSafeChartValue(item?.done);
-      const rejected = toSafeChartValue(item?.rejected);
-      approvedBoardsByDay[dateKey] += Math.max(done - rejected, 0);
-      rejectedBoardsByDay[dateKey] += rejected;
-    });
-  });
-
-  const approvedProductsByDay = {};
-  recentKeys.forEach((key) => {
-    approvedProductsByDay[key] = 0;
-  });
-  Object.values(finalProductsHistory || {}).forEach((item) => {
-    const testedAt = String(item?.testedAt || "").trim();
-    if (!testedAt) return;
-    const dateKey = toLocalDateKey(new Date(testedAt));
-    if (!(dateKey in approvedProductsByDay)) return;
-    const approvedUnits = Math.max(parseNumber(item?.done) - parseNumber(item?.rejected), 0);
-    if (approvedUnits <= 0) return;
-    approvedProductsByDay[dateKey] += 1;
-  });
-
-  qualityApprovedBoardsChartInstance = createQualityMetricChart(
-    elements.qualityApprovedBoardsChart,
-    qualityApprovedBoardsChartInstance,
-    {
-      labels,
-      values: recentKeys.map((key) => approvedBoardsByDay[key] || 0),
-    },
-    "Placas aprovadas",
-    "#1a9f7d"
-  );
-
-  qualityApprovedProductsChartInstance = createQualityMetricChart(
-    elements.qualityApprovedProductsChart,
-    qualityApprovedProductsChartInstance,
-    {
-      labels,
-      values: recentKeys.map((key) => approvedProductsByDay[key] || 0),
-    },
-    "Produto acabado aprovado",
-    "#1f7cc8"
-  );
-
-  qualityRejectedBoardsChartInstance = createQualityMetricChart(
-    elements.qualityRejectedBoardsChart,
-    qualityRejectedBoardsChartInstance,
-    {
-      labels,
-      values: recentKeys.map((key) => rejectedBoardsByDay[key] || 0),
-    },
-    "Placas reprovadas",
-    "#c74848"
-  );
-}
-
 function isUserActivelyEditing() {
   if (editingDeviceKey) return true;
   if (qualityRejectEditorKey) return true;
@@ -1539,7 +1295,6 @@ function markUserInteraction() {
 }
 
 async function refreshSharedStateFromServer({ includeCsv = true } = {}) {
-  const previousSignature = completionRefreshSignature;
   await loadServerStatus();
   await loadDailyProgressFromServer();
   await loadProductionHistoryFromServer();
@@ -1552,12 +1307,6 @@ async function refreshSharedStateFromServer({ includeCsv = true } = {}) {
     }
     renderSavedDevices();
     renderQualityPanel();
-  }
-  const nextSignature = buildCompletionSignature();
-  if (nextSignature !== previousSignature) {
-    refreshChartsOnProcessFinish(true);
-  } else {
-    completionRefreshSignature = nextSignature;
   }
 }
 
@@ -1586,6 +1335,9 @@ function setupRealtimeUpdates() {
     realtimeEventSource = new EventSource(encodeURI(EVENTS_ENDPOINT));
     realtimeEventSource.onopen = () => {
       realtimeConnected = true;
+    };
+    realtimeEventSource.onmessage = () => {
+      scheduleRealtimeRefresh();
     };
     realtimeEventSource.addEventListener("state_updated", () => {
       scheduleRealtimeRefresh();
@@ -1622,6 +1374,7 @@ function applyFiltersAndSort() {
     return b.total - a.total;
   });
 
+  updateKpis(filtered);
   renderTable(filtered);
   renderSiglaButtons(allRows);
   renderSavedDevices();
@@ -1758,6 +1511,7 @@ function bindEvents() {
     renderSiglaButtons(allRows);
     renderSavedDevices();
     renderQualityPanel();
+    updateKpis(currentChartRows.length ? currentChartRows : allRows);
     elements.modal.close();
   });
 
@@ -1782,15 +1536,13 @@ function bindEvents() {
       if (!key || !dailyProgress[key]) return;
       const card = actionBtn.closest(".quality-card");
 
-      if (action === "quality-product-test") {
-        const testedAt = new Date().toISOString();
+      if (action === "quality-complete") {
         dailyProgress[key] = {
           ...dailyProgress[key],
-          productTestedAt: testedAt,
-          testedAt,
+          testedAt: new Date().toISOString(),
         };
         saveDailyProgress();
-        sendAuditEvent("quality_product_test_complete", {
+        sendAuditEvent("quality_test_complete", {
           key,
           target: parseNumber(dailyProgress[key]?.target),
           done: parseNumber(dailyProgress[key]?.done),
@@ -1798,25 +1550,6 @@ function bindEvents() {
         });
         renderSavedDevices();
         renderQualityPanel();
-        refreshChartsOnProcessFinish(true);
-        return;
-      }
-
-      if (action === "quality-plate-test") {
-        dailyProgress[key] = {
-          ...dailyProgress[key],
-          plateTestedAt: new Date().toISOString(),
-        };
-        saveDailyProgress();
-        sendAuditEvent("quality_plate_test_only", {
-          key,
-          target: parseNumber(dailyProgress[key]?.target),
-          done: parseNumber(dailyProgress[key]?.done),
-          rejected: parseNumber(dailyProgress[key]?.rejected),
-        });
-        renderSavedDevices();
-        renderQualityPanel();
-        refreshChartsOnProcessFinish(true);
         return;
       }
 
@@ -1948,13 +1681,7 @@ function bindEvents() {
           target: parseNumber(fromFinal.target),
           done: parseNumber(fromFinal.done),
           rejected: parseNumber(fromFinal.rejected),
-          rejectionEntries: normalizeRejectionEntries(fromFinal),
-          rejectionCategory: fromFinal.rejectionCategory || "",
-          rejectionReason: fromFinal.rejectionReason || "",
-          rejectionObservation: fromFinal.rejectionObservation || "",
           productionFinalizedAt: fromFinal.productionFinalizedAt || new Date().toISOString(),
-          plateTestedAt: fromFinal.plateTestedAt || null,
-          productTestedAt: fromFinal.productTestedAt || fromFinal.testedAt || new Date().toISOString(),
           testedAt: fromFinal.testedAt || new Date().toISOString(),
           completedAt: fromFinal.completedAt || fromFinal.productionFinalizedAt || new Date().toISOString(),
         };
@@ -1989,6 +1716,7 @@ function bindEvents() {
       renderSiglaButtons(allRows);
       renderSavedDevices();
       renderQualityPanel();
+      updateKpis(currentChartRows.length ? currentChartRows : allRows);
       return;
     }
 
@@ -2009,8 +1737,6 @@ function bindEvents() {
         ...dailyProgress[key],
         productionFinalizedAt: new Date().toISOString(),
         completedAt: new Date().toISOString(),
-        plateTestedAt: null,
-        productTestedAt: null,
         testedAt: null,
       };
       saveDailyProgress();
@@ -2024,7 +1750,7 @@ function bindEvents() {
       renderSiglaButtons(allRows);
       renderSavedDevices();
       renderQualityPanel();
-      refreshChartsOnProcessFinish(true);
+      updateKpis(currentChartRows.length ? currentChartRows : allRows);
       return;
     }
 
@@ -2055,6 +1781,7 @@ function bindEvents() {
       renderSiglaButtons(allRows);
       renderSavedDevices();
       renderQualityPanel();
+      updateKpis(currentChartRows.length ? currentChartRows : allRows);
     }
   };
 
@@ -2078,7 +1805,6 @@ async function init() {
       // Mantem fallback local.
     }
     await loadDefaultCsv();
-    refreshChartsOnProcessFinish(true);
     renderSavedDevices();
     renderQualityPanel();
     setInterval(async () => {

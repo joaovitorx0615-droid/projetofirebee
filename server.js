@@ -38,6 +38,7 @@ const SHEET_CSV_URL =
   process.env.SHEET_CSV_URL ||
   "https://docs.google.com/spreadsheets/d/1ExHgKjVBPb2IhRBBMMwGeS4E1bvPuwNc4c6yap_mhJU/export?format=csv&gid=558819420";
 const SHEET_SYNC_MS = Number(process.env.SHEET_SYNC_MS) || 60_000;
+const SHEET_SYNC_ENABLED = (process.env.SHEET_SYNC_ENABLED || "true").toLowerCase() !== "false";
 const CACHE_FILE = path.join(ROOT, "data", "latest-sheet.csv");
 const HISTORY_FILE = path.join(ROOT, "data", "production-history.json");
 const DB_HOST = process.env.DB_HOST || "127.0.0.1";
@@ -597,6 +598,12 @@ function parseJsonBody(req) {
 }
 
 async function syncSheetCsv() {
+  if (!SHEET_SYNC_ENABLED) {
+    sheetState.sourceMode = "local_cache_only";
+    sheetState.lastError = null;
+    return;
+  }
+
   if (syncPromise) return syncPromise;
 
   syncPromise = (async () => {
@@ -632,6 +639,12 @@ async function startSheetSync() {
   await loadCacheFromDisk();
   await ensureHistoryDbReady();
   await loadSharedUiStateFromDb();
+  if (!SHEET_SYNC_ENABLED) {
+    sheetState.sourceMode = "local_cache_only";
+    sheetState.lastError = null;
+    console.log("Sincronizacao da planilha desativada (modo cache local).");
+    return;
+  }
   await syncSheetCsv();
   setInterval(() => {
     syncSheetCsv();
@@ -684,6 +697,7 @@ function handleApiRoutes(req, res) {
         hasData: Boolean(sheetState.csvText),
         updatedAt: sheetState.updatedAt,
         lastError: sheetState.lastError,
+        syncEnabled: SHEET_SYNC_ENABLED,
         syncIntervalMs: SHEET_SYNC_MS,
         sourceMode: sheetState.sourceMode,
         historyMode: historyRuntime.mode,
@@ -831,6 +845,18 @@ function handleApiRoutes(req, res) {
   }
 
   if (pathname === "/api/producao-sync") {
+    if (!SHEET_SYNC_ENABLED) {
+      res.writeHead(409, { "Content-Type": "application/json; charset=utf-8" });
+      res.end(
+        JSON.stringify({
+          ok: false,
+          message: "Sincronizacao da planilha desativada por configuracao.",
+          sourceMode: "local_cache_only",
+        })
+      );
+      return true;
+    }
+
     syncSheetCsv()
       .then(async () => {
         await saveAuditEvent("sheet_sync_manual", { sourceMode: sheetState.sourceMode }, req);
@@ -1002,7 +1028,11 @@ async function boot() {
   await startSheetSync();
   server.listen(PORT, () => {
     console.log(`Servidor ativo em http://localhost:${PORT}`);
-    console.log(`Sincronizacao ativa: ${SHEET_SYNC_MS}ms`);
+    if (SHEET_SYNC_ENABLED) {
+      console.log(`Sincronizacao ativa: ${SHEET_SYNC_MS}ms`);
+    } else {
+      console.log("Sincronizacao desativada via SHEET_SYNC_ENABLED=false");
+    }
   });
 }
 
