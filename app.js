@@ -86,7 +86,6 @@ const elements = {
   savedDevices: document.querySelector("#saved-devices"),
   progressPanel: document.querySelector("#saved-devices")?.closest(".chart-panel"),
   doneDevices: document.querySelector("#done-devices"),
-  donePanel: document.querySelector("#done-devices")?.closest(".chart-panel"),
   systemAlert: document.querySelector("#system-alert"),
   systemNote: document.querySelector("#system-note"),
 };
@@ -116,7 +115,7 @@ let realtimeEventSource = null;
 let realtimeRefreshTimer = null;
 let realtimeConnected = false;
 let qualityRejectedSignature = "";
-let draggedDeviceKey = "";
+let draggedCardState = null;
 
 function parseNumber(value) {
   const num = Number(String(value ?? "").replace(",", ".").trim());
@@ -149,6 +148,13 @@ function buildDeleteIconButton(action, key) {
   return `<button type="button" class="saved-card-close" data-action="${action}" data-key="${key}" aria-label="Excluir">
     X
   </button>`;
+}
+
+function buildCardTopActions(editAction, deleteAction, key) {
+  return `<div class="saved-card-top-actions">
+    ${buildEditIconButton(editAction, key)}
+    ${buildDeleteIconButton(deleteAction, key)}
+  </div>`;
 }
 
 function normalizeRejectionReason(progress) {
@@ -764,62 +770,97 @@ function moveInProgressDeviceBackToQueue(key) {
   updateKpis();
 }
 
-function bindDragSource(container) {
-  if (!container) return;
-
-  container.addEventListener("dragstart", (event) => {
-    const card = event.target.closest(".saved-card[draggable='true']");
-    if (!card) return;
-    const key = String(card.dataset.key || "");
-    if (!key) return;
-    draggedDeviceKey = key;
-    card.classList.add("dragging");
-    if (event.dataTransfer) {
-      event.dataTransfer.effectAllowed = "move";
-      event.dataTransfer.setData("text/plain", key);
-    }
-  });
-
-  container.addEventListener("dragend", (event) => {
-    const card = event.target.closest(".saved-card");
-    if (card) {
-      card.classList.remove("dragging");
-    }
-    draggedDeviceKey = "";
+function clearDragTargets() {
+  [elements.awaitingPanel, elements.progressPanel].forEach((panel) => {
+    if (panel) panel.classList.remove("drag-target");
   });
 }
 
-function bindDragTarget(container, acceptedStage, onDropAction) {
+function resetDraggedCard() {
+  if (!draggedCardState) return;
+  const { card } = draggedCardState;
+  card.classList.remove("dragging");
+  card.style.left = "";
+  card.style.top = "";
+  card.style.width = "";
+  card.style.transform = "";
+  clearDragTargets();
+  draggedCardState = null;
+}
+
+function getDropActionForPanel(panel, stage) {
+  if (!panel) return null;
+  if (panel === elements.progressPanel && stage === "queued") return startQueuedDevice;
+  if (panel === elements.awaitingPanel && stage === "in-progress") return moveInProgressDeviceBackToQueue;
+  return null;
+}
+
+function handleCardDragMove(event) {
+  if (!draggedCardState) return;
+  const deltaX = event.clientX - draggedCardState.startX;
+  const deltaY = event.clientY - draggedCardState.startY;
+  const movedEnough = Math.abs(deltaX) > 6 || Math.abs(deltaY) > 6;
+  if (!draggedCardState.active && !movedEnough) return;
+
+  if (!draggedCardState.active) {
+    draggedCardState.active = true;
+    draggedCardState.card.classList.add("dragging");
+  }
+
+  draggedCardState.card.style.left = `${draggedCardState.originLeft + deltaX}px`;
+  draggedCardState.card.style.top = `${draggedCardState.originTop + deltaY}px`;
+  draggedCardState.card.style.width = `${draggedCardState.width}px`;
+
+  const hovered = document.elementFromPoint(event.clientX, event.clientY)?.closest(".chart-panel");
+  clearDragTargets();
+  const dropAction = getDropActionForPanel(hovered, draggedCardState.stage);
+  if (dropAction) {
+    hovered.classList.add("drag-target");
+    draggedCardState.dropAction = dropAction;
+  } else {
+    draggedCardState.dropAction = null;
+  }
+}
+
+function handleCardDragEnd(event) {
+  if (!draggedCardState) return;
+  const { key, active, dropAction } = draggedCardState;
+  resetDraggedCard();
+  if (active && dropAction) {
+    dropAction(key);
+  }
+}
+
+function bindCardDragging(container) {
   if (!container) return;
 
-  container.addEventListener("dragover", (event) => {
-    if (!draggedDeviceKey) return;
-    const progress = dailyProgress[draggedDeviceKey];
-    if (!progress) return;
-    const stage = progress?.startedAt ? "in-progress" : "queued";
-    if (stage !== acceptedStage) return;
-    event.preventDefault();
-    if (event.dataTransfer) {
-      event.dataTransfer.dropEffect = "move";
-    }
-    container.classList.add("drag-target");
-  });
+  container.addEventListener("pointerdown", (event) => {
+    if (event.button !== 0) return;
+    const interactive = event.target.closest("button, input, select, textarea, a, label");
+    if (interactive) return;
+    const card = event.target.closest(".saved-card[data-drag-stage]");
+    if (!card) return;
 
-  container.addEventListener("dragleave", (event) => {
-    if (event.currentTarget === event.target || !container.contains(event.relatedTarget)) {
-      container.classList.remove("drag-target");
-    }
-  });
+    const key = String(card.dataset.key || "");
+    const stage = String(card.dataset.dragStage || "");
+    if (!key || !stage) return;
 
-  container.addEventListener("drop", (event) => {
-    if (!draggedDeviceKey) return;
-    const progress = dailyProgress[draggedDeviceKey];
-    const stage = progress?.startedAt ? "in-progress" : "queued";
-    container.classList.remove("drag-target");
-    if (stage !== acceptedStage) return;
-    event.preventDefault();
-    onDropAction(draggedDeviceKey);
-    draggedDeviceKey = "";
+    const rect = card.getBoundingClientRect();
+    draggedCardState = {
+      key,
+      stage,
+      card,
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startY: event.clientY,
+      originLeft: rect.left,
+      originTop: rect.top,
+      width: rect.width,
+      active: false,
+      dropAction: null,
+    };
+
+    card.setPointerCapture(event.pointerId);
   });
 }
 
@@ -1180,17 +1221,14 @@ function renderSiglaButtons(rows) {
 
   elements.siglaButtons.innerHTML = queuedEntries
     .map(
-      (item) => `<article class="saved-card pending-start" data-key="${item.key}" data-drag-stage="queued" draggable="true">
-        ${buildDeleteIconButton("queue-delete", item.key)}
+      (item) => `<article class="saved-card pending-start" data-key="${item.key}" data-drag-stage="queued">
+        ${buildCardTopActions("queue-edit", "queue-delete", item.key)}
         <h4>${escapeHtml(item.codigo)} - ${escapeHtml(item.sigla)}</h4>
         ${buildDeviceLegendLine([
           `Prod. <strong>${formatNumber(item.target)}</strong>`,
           item.deadline ? `Term. <strong>${formatDeadline(item.deadline)}</strong>` : "Term. <strong>-</strong>",
         ])}
         <span class="saved-tag">Aguardando inicio</span>
-        <div class="saved-actions">
-          ${buildEditIconButton("queue-edit", item.key)}
-        </div>
       </article>`
     )
     .join("");
@@ -1249,8 +1287,8 @@ function renderSavedDevices() {
     </article>`;
       }
 
-        return `<article class="saved-card${item.isDone ? " done" : ""}" data-key="${item.key}" data-drag-stage="in-progress" draggable="true">
-      ${buildDeleteIconButton("delete", item.key)}
+        return `<article class="saved-card${item.isDone ? " done" : ""}" data-key="${item.key}" data-drag-stage="in-progress">
+      ${buildCardTopActions("edit", "delete", item.key)}
       <h4>${item.codigo} - ${item.sigla}</h4>
       ${buildDeviceLegendLine([
         `Prod. <strong>${formatNumber(item.target)}</strong>`,
@@ -1261,7 +1299,6 @@ function renderSavedDevices() {
       ${buildDeviceLegendLine([item.deadline ? `Term. <strong>${formatDeadline(item.deadline)}</strong>` : "Term. <strong>-</strong>"])}
       <span class="saved-tag">${item.isDone ? "Pronto para finalizar" : "Em andamento"}</span>
       <div class="saved-actions">
-        ${buildEditIconButton("edit", item.key)}
         <button type="button" class="saved-action-btn saved-complete-btn" data-action="complete" data-key="${item.key}">Concluido</button>
       </div>
     </article>`;
@@ -1835,6 +1872,21 @@ function bindEvents() {
 
   elements.targetInput.addEventListener("input", updateRemainingOutput);
   elements.doneInput.addEventListener("input", updateRemainingOutput);
+  document.addEventListener("pointermove", (event) => {
+    if (!draggedCardState) return;
+    if (draggedCardState.pointerId !== event.pointerId) return;
+    handleCardDragMove(event);
+  });
+  document.addEventListener("pointerup", (event) => {
+    if (!draggedCardState) return;
+    if (draggedCardState.pointerId !== event.pointerId) return;
+    handleCardDragEnd(event);
+  });
+  document.addEventListener("pointercancel", (event) => {
+    if (!draggedCardState) return;
+    if (draggedCardState.pointerId !== event.pointerId) return;
+    resetDraggedCard();
+  });
   elements.saveProductionBtn.addEventListener("click", () => {
     if (!selectedRowKey || !selectedRow) return;
     const target = parseNumber(elements.targetInput.value);
@@ -2069,6 +2121,8 @@ function bindEvents() {
     }
 
     if (action === "complete") {
+      const shouldComplete = window.confirm("Tem certeza que deseja concluir este dispositivo?");
+      if (!shouldComplete) return;
       completeInProgressDevice(key);
       return;
     }
@@ -2105,11 +2159,8 @@ function bindEvents() {
   };
 
   elements.savedDevices.addEventListener("click", handleSavedDeviceActions);
-  bindDragSource(elements.siglaButtons);
-  bindDragSource(elements.savedDevices);
-  bindDragTarget(elements.awaitingPanel, "in-progress", moveInProgressDeviceBackToQueue);
-  bindDragTarget(elements.progressPanel, "queued", startQueuedDevice);
-  bindDragTarget(elements.donePanel, "in-progress", completeInProgressDevice);
+  bindCardDragging(elements.siglaButtons);
+  bindCardDragging(elements.savedDevices);
 }
 
 async function init() {

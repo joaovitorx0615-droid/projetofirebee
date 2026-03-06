@@ -545,10 +545,12 @@ h1 {
   border-left: 6px solid #ffb020;
   padding: 10px;
   transition: transform 0.18s ease, box-shadow 0.18s ease, background 0.18s ease;
+  touch-action: none;
 }
 
 .saved-card h4 {
   margin: 0 0 6px;
+  padding-right: 58px;
   font: 700 0.95rem/1 "Space Grotesk", sans-serif;
 }
 
@@ -656,8 +658,12 @@ h1 {
 }
 
 .saved-card.dragging {
-  opacity: 0.6;
-  box-shadow: 0 10px 24px rgba(0, 0, 0, 0.16);
+  opacity: 0.96;
+  box-shadow: 0 18px 34px rgba(0, 0, 0, 0.2);
+  position: fixed;
+  z-index: 90;
+  pointer-events: none;
+  transform: rotate(1.2deg);
 }
 
 .saved-card.done .saved-tag {
@@ -665,9 +671,6 @@ h1 {
 }
 
 .saved-card-close {
-  position: absolute;
-  top: 8px;
-  right: 8px;
   width: 24px;
   height: 24px;
   border: 0;
@@ -676,6 +679,30 @@ h1 {
   color: #fff;
   font: 800 0.72rem/1 "DM Sans", sans-serif;
   cursor: pointer;
+}
+
+.saved-card-top-actions {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  display: flex;
+  gap: 6px;
+}
+
+.saved-card-top-actions .saved-icon-btn,
+.saved-card-top-actions .saved-card-close {
+  flex: 0 0 24px;
+  width: 24px;
+  min-height: 24px;
+}
+
+.saved-card-top-actions .saved-icon-btn {
+  background: #2b2b2b;
+}
+
+.saved-card-top-actions .saved-icon-btn svg {
+  width: 14px;
+  height: 14px;
 }
 
 .trends-card {
